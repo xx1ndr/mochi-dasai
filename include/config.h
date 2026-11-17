@@ -72,6 +72,7 @@
 // Satu frame penuh = 1024 byte lewat I2C, jadi kalau terlalu cepat WiFi
 // (hotspot) bisa kalah prioritas dan HP tidak menemukan jaringan.
 // 40 = 25 fps, 60 = 16 fps, 83 = 12 fps, 120 = 8 fps.
+// Ekspresi dipilih acak + jeda acak (lihat drawFace() di src/main.cpp).
 #define FACE_FRAME_MS 60
 
 // 0 = SSD1306 (paling umum), 1 = SH1106 (kalau tampilan bergeser/noise)

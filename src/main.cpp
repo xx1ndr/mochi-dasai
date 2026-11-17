@@ -24,11 +24,13 @@
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
+#include <esp_system.h>        // esp_random() untuk ekspresi acak
 #include <math.h>
 #include <string.h>
 
 #include "../include/config.h"
 #include "../include/dasai_frames.h"   // 90 frame animasi mochi asli (PROGMEM)
+#include "../include/mochi_gif.h"      // GIF 90 frame untuk halaman web
 
 // ------------------------------------------------------------ objek global
 // clock/data ikut diberikan supaya U8g2 memakai pin I2C dari config.h
@@ -107,6 +109,10 @@ struct Weather {
   uint32_t updated;
 };
 static Weather wx = {false, NAN, NAN, NAN, NAN, -1, 0};
+
+// Lokasi untuk cuaca. Urutan prioritas: GPS -> lokasi dari web (NVS) -> HOME.
+static float wxLat = HOME_LAT, wxLon = HOME_LON;
+static bool  wxLocSet = false;
 
 static uint32_t gpsChars = 0;
 static double   tripKm = 0;
@@ -212,6 +218,18 @@ static void nvsBegin() { prefs.begin("mochi", false); }
 static uint32_t nvsGet(const char* key, uint32_t def) { return prefs.getUInt(key, def); }
 static void nvsSet(const char* key, uint32_t val) { prefs.putUInt(key, val); }
 
+// Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau GPS tidak fix.
+static void saveWxLocation(float lat, float lon) {
+  prefs.putBool("wxlocset", true);
+  prefs.putFloat("wxlat", lat);
+  prefs.putFloat("wxlon", lon);
+  wxLat = lat; wxLon = lon; wxLocSet = true;
+}
+static void clearWxLocation() {
+  prefs.remove("wxlocset");
+  wxLat = HOME_LAT; wxLon = HOME_LON; wxLocSet = false;
+}
+
 static void goFace() {
   screen = SCR_FACE;
   faceHintUntil = millis() + 6000;
@@ -285,11 +303,15 @@ static void onFaceTap() {
 }
 
 enum MenuItem : uint8_t {
-  MENU_CLOCK = 0, MENU_WEATHER, MENU_NOTIF, MENU_MOOD, MENU_FEED, MENU_CLOSE, MENU_COUNT
+  MENU_CLOCK = 0, MENU_WEATHER, MENU_GPS, MENU_NOTIF,
+  MENU_MOOD, MENU_FEED, MENU_CLOSE, MENU_COUNT
 };
 static const char* MENU_LABEL[] = {
-  "Jam", "Cuaca", "Notif", "Ubah mood", "Kasih makan", "Tutup"
+  "Jam", "Cuaca", "GPS/Peta", "Notif", "Ubah mood", "Kasih makan", "Tutup"
 };
+
+// Pilihan tambahan di picker mood supaya selalu ada jalan keluar ke menu.
+static const int MOOD_CANCEL = (int)Mood::Count;
 
 static void onMenuSelect() {
   switch (menuIndex) {
@@ -299,6 +321,10 @@ static void onMenuSelect() {
     case MENU_WEATHER:
       screen = SCR_WX;
       forceWeather = true;
+      configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org");
+      break;
+    case MENU_GPS:
+      screen = SCR_GPS;
       break;
     case MENU_NOTIF:
       screen = SCR_MSG;
@@ -412,9 +438,9 @@ static void timeTask() {
   if (WiFi.status() != WL_CONNECTED) { ntpStarted = false; return; }
 
   if (!ntpStarted) {
-    configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org", "time.google.com");
-    setenv("TZ", TZ_STRING, 1);
-    tzset();
+    // configTzTime penting: configTime(0,0,...) menimpa TZ jadi UTC0, sehingga
+    // jam yang dikirim browser/GPS tampil 7 jam lebih awal (WIB jadi UTC).
+    configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org", "time.google.com");
     ntpStarted = true;
     lastSync   = millis();
     return;
@@ -422,7 +448,7 @@ static void timeTask() {
 
   if (localNow(nullptr)) {
     if (millis() - lastSync > 3600000UL) {   // resync tiap jam
-      configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org");
+      configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org");
       lastSync = millis();
     }
     return;
@@ -507,7 +533,10 @@ static void weatherTask() {
   if (lastTry != 0 && now - lastTry < interval) return;
   lastTry = now;
 
-  float lat = HOME_LAT, lon = HOME_LON;
+  // GPS dipakai kalau ada fix; kalau tidak, pakai lokasi yang diset di web,
+  // baru terakhir koordinat cadangan HOME_LAT/HOME_LON di config.h.
+  float lat = wxLocSet ? wxLat : HOME_LAT;
+  float lon = wxLocSet ? wxLon : HOME_LON;
   if (gps.location.isValid() && gps.location.age() < 15000) {
     lat = (float)gps.location.lat();
     lon = (float)gps.location.lng();
@@ -702,12 +731,53 @@ static void drawStatusBar() {
 // diekspor ke include/dasai_frames.h (sumber: github.com/upiir/esp32s3_oled_dasai_mochi).
 //
 // Frame 0-12 itu fade in dan frame 59-89 fade out, jadi yang diputar hanya
-// 13..58 dan bolak-balik (ping-pong) supaya sambungan loop-nya tidak kelihatan
-// dan wajah tidak pernah hilang jadi layar hitam.
+// 13..58. Potongan acak dari rentang ini + jeda acak dipakai supaya perilakunya
+// mirip web The Mochi: ekspresi berubah-ubah, ada delay antar ekspresi.
+// Frame asli tidak diubah satu bit pun.
 #define FACE_LOOP_FIRST 13
 #define FACE_LOOP_LAST  58
 
 static int16_t  faceFrozen = -1;   // >= 0 = tampilkan 1 frame saja (diagnosa /face)
+
+// ---- transisi halus antar wajah ----
+// Frame DASAI tidak diubah satu bit pun. Yang diperbaiki: kecepatan ping-pong
+// (ease in/out) dan crossfade saat pindah ke/dari wajah mood.
+#define FACE_BLEND_MS 180
+static uint8_t facePrevBuf[DASAI_FRAME_BYTES];  // snapshot frame sebelumnya (1024 byte)
+static uint32_t faceBlendUntil = 0;
+
+static uint8_t faceModeNow() {
+  if (faceFrozen >= 0) return 3;                     // frame diagnosa
+  if (screen == SCR_EAT) return 2;                   // wajah "Nyam"
+  if (mood != Mood::Happy || react != React::None) return 1; // wajah mood
+  return 0;                                          // animasi DASAI
+}
+
+// Crossfade 1-bit memakai pola Bayer 4x4 supaya tidak ada garis-garis.
+static void blendFromPrev(uint32_t now) {
+  if (now >= faceBlendUntil) return;
+  uint32_t remain = faceBlendUntil - now;
+  int progress = 255 - (int)(remain * 255UL / FACE_BLEND_MS);
+  if (progress < 0) progress = 0;
+  if (progress > 255) progress = 255;
+
+  static const uint8_t kBayer[16] = {
+     0, 8, 2,10, 12, 4,14, 6, 3,11, 1, 9, 15, 7,13, 5
+  };
+  uint8_t* buf = oled.getBufferPtr();
+  if (!buf) return;
+
+  for (int y = 0; y < DASAI_FRAME_H; ++y) {
+    for (int x = 0; x < DASAI_FRAME_W; ++x) {
+      int th = kBayer[(y & 3) * 4 + (x & 3)] * 17;  // 0..255
+      if (th <= progress) continue;                 // pakai pixel baru
+      int idx = y * (DASAI_FRAME_W / 8) + (x >> 3);
+      uint8_t mask = (uint8_t)(1u << (7 - (x & 7)));
+      if (facePrevBuf[idx] & mask) buf[idx] |= mask;
+      else                         buf[idx] &= (uint8_t)~mask;
+    }
+  }
+}
 
 // ---- wajah mood (digambar sendiri, bukan bitmap DASAI) ----
 // Dipakai saat mood bukan Senang, saat sedang makan, atau saat ada reaksi
@@ -870,9 +940,16 @@ static void drawMoodFace(uint32_t now) {
 }
 
 static void drawFace() {
-  static int16_t  f    = FACE_LOOP_FIRST;
-  static int8_t   dir  = 1;
-  static uint32_t last = 0;
+  // Ekspresi acak: ambil potongan 6..14 frame dari 13..58, putar bolak-balik,
+  // lalu diam selama 0.8..5 detik sebelum memilih potongan baru.
+  static int      exprFirst = FACE_LOOP_FIRST;
+  static int      exprLast  = FACE_LOOP_FIRST;
+  static int      exprPos   = FACE_LOOP_FIRST;
+  static int      exprDir   = 1;
+  static bool     holding   = false;
+  static bool     started   = false;
+  static uint32_t holdUntil = 0;
+  static uint32_t last      = 0;
   uint32_t now = millis();
 
   // habis reaksi, kembalikan ke wajah DASAI kalau mood-nya Senang
@@ -889,14 +966,41 @@ static void drawFace() {
     return;
   }
 
-  if (now - last >= FACE_FRAME_MS) {
+  auto pickExpression = [&]() {
+    uint32_t r = esp_random();
+    int len = 6 + (int)(r % 9);                  // 6..14 frame
+    int maxFirst = FACE_LOOP_LAST - len;
+    exprFirst = FACE_LOOP_FIRST +
+                (int)((r >> 8) % (uint32_t)(maxFirst - FACE_LOOP_FIRST + 1));
+    exprLast = exprFirst + len;
+    exprPos  = exprFirst;
+    exprDir  = 1;
+    holding  = false;
+    last     = now;
+  };
+
+  if (!started) { started = true; pickExpression(); }
+
+  if (holding) {
+    if (now >= holdUntil) pickExpression();
+  } else if (now - last >= FACE_FRAME_MS) {
+    uint8_t steps = (uint8_t)((now - last) / FACE_FRAME_MS);
+    if (steps > 4) steps = 4;                   // jangan loncat jauh setelah jeda
     last = now;
-    f += dir;
-    if (f >= FACE_LOOP_LAST)       { f = FACE_LOOP_LAST;  dir = -1; }
-    else if (f <= FACE_LOOP_FIRST) { f = FACE_LOOP_FIRST; dir =  1; }
+    while (steps--) {
+      exprPos += exprDir;
+      if (exprPos >= exprLast) { exprPos = exprLast; exprDir = -1; }
+      if (exprDir < 0 && exprPos <= exprFirst) {
+        exprPos = exprFirst;
+        holding = true;
+        holdUntil = now + 800UL + (esp_random() % 4200UL); // delay 0.8..5 dtk
+        break;
+      }
+    }
   }
 
-  oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H, dasaiFrame((uint8_t)f));
+  oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
+                dasaiFrame((uint8_t)exprPos));
 }
 
 static void drawHome() {
@@ -1198,12 +1302,12 @@ static void drawSys() {
 
 // ---- menu sentuh (tahan lama dari wajah) ----
 static void drawMenuScreen() {
-  oled.setFont(u8g2_font_6x10_tf);
+  oled.setFont(u8g2_font_5x7_tf);
   for (int i = 0; i < MENU_COUNT; ++i) {
-    int baseline = 10 + i * 9;
+    int baseline = 8 + i * 8;              // 7 item muat: 8,16,...,56
     if (i == menuIndex) {
       oled.setDrawColor(1);
-      oled.drawBox(0, baseline - 8, 128, 10);
+      oled.drawBox(0, baseline - 7, 128, 8);
       oled.setDrawColor(0);
     } else {
       oled.setDrawColor(1);
@@ -1211,7 +1315,6 @@ static void drawMenuScreen() {
     oled.drawStr(6, baseline, MENU_LABEL[i]);
   }
   oled.setDrawColor(1);
-  oled.setFont(u8g2_font_5x7_tf);
   oled.drawStr(0, 63, "tap=pindah tahan=pilih");
 }
 
@@ -1219,21 +1322,33 @@ static void drawMoodPicker() {
   oled.setDrawColor(1);
   oled.setFont(u8g2_font_5x7_tf);
   oled.drawStr(0, 8, "tap pindah, tahan pilih");
-  for (int i = 0; i < (int)Mood::Count; ++i) {
-    int baseline = 20 + i * 9;
+  for (int i = 0; i <= MOOD_CANCEL; ++i) {
+    int baseline = 14 + i * 8;
     if (i == moodIndex) {
       oled.setDrawColor(1);
-      oled.drawBox(0, baseline - 7, 128, 9);
+      oled.drawBox(0, baseline - 7, 128, 8);
       oled.setDrawColor(0);
     } else {
       oled.setDrawColor(1);
     }
-    oled.drawStr(6, baseline, MOOD_NAME[i]);
+    oled.drawStr(6, baseline, i == MOOD_CANCEL ? "Batal (ke menu)" : MOOD_NAME[i]);
   }
   oled.setDrawColor(1);
 }
 
 static void render() {
+  uint32_t now = millis();
+
+  // Simpan isi buffer terakhir SEBELUM clear, dipakai crossfade wajah.
+  uint8_t* buf = oled.getBufferPtr();
+  if (buf) memcpy(facePrevBuf, buf, DASAI_FRAME_BYTES);
+
+  uint8_t mode = (screen == SCR_FACE || screen == SCR_EAT) ? faceModeNow() : 255;
+  static uint8_t prevMode = 255;
+  if (mode != 255 && prevMode != 255 && mode != prevMode)
+    faceBlendUntil = now + FACE_BLEND_MS;
+  prevMode = mode;
+
   oled.clearBuffer();
   switch (screen) {
     case SCR_FACE: drawFace(); break;
@@ -1247,6 +1362,7 @@ static void render() {
     case SCR_EAT:  drawFace(); break;   // wajah "Nyam"
     default: break;
   }
+  if (mode != 255) blendFromPrev(now);
   uint32_t t0 = micros();
   oled.sendBuffer();
   frameMs = (micros() - t0) / 1000;
@@ -1269,7 +1385,7 @@ static void onShortPress() {
       menuIndex = (menuIndex + 1) % MENU_COUNT;
       break;
     case SCR_MOOD:
-      moodIndex = (moodIndex + 1) % (int)Mood::Count;
+      moodIndex = (moodIndex + 1) % (MOOD_CANCEL + 1);
       break;
     case SCR_EAT:
       break;                             // sedang makan, abaikan tap
@@ -1299,9 +1415,13 @@ static void onLongPress() {
       onMenuSelect();                    // tahan = pilih item menu
       break;
     case SCR_MOOD:
-      setMood((Mood)moodIndex);
-      react = React::None;
-      goFace();
+      if (moodIndex == MOOD_CANCEL) {
+        openMenu();                        // "Batal" = kembali ke menu
+      } else {
+        setMood((Mood)moodIndex);
+        react = React::None;
+        goFace();
+      }
       break;
     case SCR_EAT:
       setMood(Mood::Happy);
@@ -1313,12 +1433,13 @@ static void onLongPress() {
       clearInbox();
       beep();
       Serial.println("[ui] notif dihapus");
+      openMenu();                          // jangan sampai nyangkut di layar notif
       break;
     default:
-      forceWeather = true;
-      configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org");
-      beep();
-      Serial.println("[ui] refresh cuaca + jam");
+      // PERBAIKAN: dari layar jam/cuaca/gps/sistem, tahan harus membuka menu.
+      // Sebelumnya cabang ini cuma refresh cuaca sehingga menu tak terjangkau
+      // dan ESP32 harus di-reset untuk bisa masuk menu lagi.
+      openMenu();
       break;
   }
   Serial.printf("[ui] tahan screen=%s mood=%s\n", SCREEN_NAME[screen], moodName(mood));
@@ -1377,6 +1498,11 @@ button{background:#3ddc97;color:#0b0b0b;border:0;font-weight:700}
 button.alt{background:#1c1c1c;color:#eee;border:1px solid #3a3a3a;font-weight:600}
 a{color:#3ddc97}
 </style>
+<img src="/mochi.gif" alt="animasi mochi dasai" width=256
+     style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
+<p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
+  animasi DASAI asli &middot; 90 frame &middot; <a href="/mochi.gif">buka GIF</a>
+</p>
 <h3>layar <span id=now>-</span></h3>
 <button id=next>Layar berikutnya</button>
 <button class=alt id=refresh>Refresh cuaca + jam</button>
@@ -1396,6 +1522,23 @@ a{color:#3ddc97}
   <input id=t value="Halo dari browser">
   <button>Kirim</button>
 </form>
+<h3>lokasi cuaca</h3>
+<p style="font-size:12px;color:#888;margin:0 0 6px">
+  GPS sering tidak dapat sinyal di dalam ruangan. Isi koordinat tempatmu supaya
+  cuaca di OLED sesuai lokasi (tersimpan permanen).
+</p>
+<form onsubmit="event.preventDefault();
+  fetch('/location?lat='+encodeURIComponent(la.value)+'&lon='+encodeURIComponent(lo.value))
+  .then(r=>r.json()).then(l=>{ $('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)') })">
+  <input id=la type=number step=0.0001 placeholder="latitude, mis -6.2000">
+  <input id=lo type=number step=0.0001 placeholder="longitude, mis 106.8167">
+  <button>Simpan lokasi</button>
+</form>
+<p style="font-size:12px">Sekarang: <b id=locNow>-</b> &middot;
+  <a href="#" onclick="fetch('/location?reset=1').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+' (default)'});return false">reset</a>
+</p>
+<button class=alt onclick="pakaiGpsHp()">Pakai lokasi HP</button>
+<p id=geoErr style="font-size:12px;color:#f88"></p>
 <h3>rute (layar GPS)</h3>
 <form onsubmit="event.preventDefault();
   fetch('/nav?kind='+encodeURIComponent(k.value)+'&dist='+encodeURIComponent(d.value)+'&road='+encodeURIComponent(r.value))
@@ -1413,22 +1556,97 @@ a{color:#3ddc97}
   <input id=r value="Jl. Sudirman" placeholder="nama jalan">
   <button>Kirim rute</button>
 </form>
-<p><a href="/api/status">/api/status</a></p>
+<p><a href="/maps">Peta GPS live (Google Maps)</a> &middot; <a href="/api/status">/api/status</a></p>
 <script>
 const $=id=>document.getElementById(id);
 function upd(){fetch('/api/status').then(r=>r.json()).then(s=>{$('now').textContent='- '+s.screen;$('moodNow').textContent='- '+s.mood})}
+function locUpd(){fetch('/location').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)')})}
+function pakaiGpsHp(){
+  if(!navigator.geolocation){$('geoErr').textContent='Browser tidak mendukung geolocation';return}
+  $('geoErr').textContent='Mencari lokasi HP...';
+  navigator.geolocation.getCurrentPosition(
+    p=>{
+      fetch('/location?lat='+p.coords.latitude.toFixed(5)+'&lon='+p.coords.longitude.toFixed(5))
+        .then(r=>r.json()).then(()=>{$('geoErr').textContent='Lokasi HP tersimpan';locUpd()});
+    },
+    e=>{$('geoErr').textContent='GPS HP gagal (kode '+e.code+'). Isi koordinat manual di atas.'},
+    {enableHighAccuracy:true, timeout:10000}
+  );
+}
 $('next').onclick=()=>fetch('/next').then(upd);
 $('refresh').onclick=()=>fetch('/refresh');
 $('clear').onclick=()=>fetch('/clear').then(upd);
 $('feed').onclick=()=>fetch('/feed').then(upd);
 function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
 syncClock(); setInterval(syncClock, 60000);
-upd();
+upd(); locUpd();
+</script>
+)HTML";
+
+// Halaman monitor GPS: peta Google Maps live tanpa API key.
+// Peta di-render langsung di browser HP (butuh internet di HP), koordinat
+// diambil dari /api/status yang dibaca ESP32 dari modul GPS.
+static const char MAP_HTML[] PROGMEM = R"HTML(
+<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>mochi gps monitor</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#121212;color:#eee;margin:0;padding:14px}
+h3{margin:0 0 8px} h3 span{color:#3ddc97;font-weight:400;font-size:14px}
+#info{font-size:13px;line-height:1.6;background:#1c1c1c;border:1px solid #333;
+  border-radius:10px;padding:8px 10px;margin-bottom:10px}
+#info b{color:#3ddc97}
+iframe{width:100%;height:65vh;min-height:340px;border:0;border-radius:10px;background:#1c1c1c}
+p{font-size:13px} a{color:#3ddc97}
+button{font:inherit;padding:8px 12px;border-radius:8px;border:0;background:#3ddc97;color:#0b0b0b;font-weight:700}
+</style>
+<h3>GPS monitor <span id=stat>-</span></h3>
+<div id=info>Menunggu data GPS...</div>
+<iframe id=map title="Peta Google Maps" loading="lazy"></iframe>
+<p><a id=open target=_blank rel=noopener>Buka di Google Maps</a> &middot; <a href="/">kontrol</a></p>
+<p><button onclick="location.reload()">Muat ulang</button> &middot; otomatis tiap 3 detik</p>
+<script>
+const $ = id => document.getElementById(id);
+let defaultLL = null;   // diisi dari /api/status (lokasi cuaca / HOME)
+let lastLL = '', lastFixLL = '';
+function f(v, d){ return (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '-'; }
+function upd(){
+  fetch('/api/status').then(r => r.json()).then(s => {
+    const g = s.gps || {};
+    const fix = !!g.fix;
+    if (!fix && !lastFixLL && typeof s.wx_lat === 'number')
+      defaultLL = f(s.wx_lat,6) + ',' + f(s.wx_lon,6);
+    const ll = fix ? f(g.lat,6) + ',' + f(g.lon,6)
+                   : (lastFixLL || defaultLL || '-6.2088,106.8456');
+    if (fix) lastFixLL = ll;
+    $('stat').textContent = '- ' + (fix ? 'GPS fix' : 'cari satelit');
+    $('info').innerHTML =
+      'Posisi: <b>' + (fix ? f(g.lat,6) + ', ' + f(g.lon,6) : 'belum tersedia') + '</b><br>' +
+      'Satelit: <b>' + (g.sats||0) + '</b> &middot; HDOP: <b>' + f(g.hdop,1) + '</b> &middot; ' +
+      'umur data: <b>' + (g.age_ms||0) + ' ms</b><br>' +
+      'Kecepatan: <b>' + f(g.speed_kmh,1) + ' km/j</b> &middot; arah: <b>' + f(g.course,0) + '&deg;</b> &middot; ' +
+      'altitude: <b>' + f(g.alt_m,0) + ' m</b><br>' +
+      'Perjalanan: <b>' + f(g.trip_km,2) + ' km</b> &middot; WiFi: <b>' + (g.rssi_dbm||s.rssi||0) + ' dBm</b>';
+    if (ll !== lastLL) {
+      lastLL = ll;
+      const q = encodeURIComponent(ll);
+      $('map').src = 'https://www.google.com/maps?q=' + q + '&z=16&output=embed';
+      $('open').href = 'https://www.google.com/maps?q=' + q + '&z=16';
+    }
+  }).catch(() => { $('stat').textContent = '- ESP32 offline'; });
+}
+upd(); setInterval(upd, 3000);
 </script>
 )HTML";
 
 static void setupWeb() {
   web.on("/", HTTP_GET, []() { web.send_P(200, "text/html", PAGE_HTML); });
+  web.on("/maps", HTTP_GET, []() { web.send_P(200, "text/html", MAP_HTML); });
+  web.on("/map", HTTP_GET, []() { web.send_P(200, "text/html", MAP_HTML); });
+  // Animasi DASAI lengkap (90 frame) dalam satu GIF, tanpa API/key eksternal.
+  web.on("/mochi.gif", HTTP_GET, []() {
+    web.sendHeader("Cache-Control", "public, max-age=86400");
+    web.send_P(200, "image/gif", (const char*)MOCHI_GIF, MOCHI_GIF_LEN);
+  });
 
   // HP (iOS/Android) suka membuka halaman "login WiFi" sendiri. Semua
   // permintaan asing kita arahkan ke halaman kontrol supaya popup muncul.
@@ -1451,6 +1669,28 @@ static void setupWeb() {
       }
     }
     web.send(200, "text/plain", "ok");
+  });
+
+  // Lokasi cuaca: GPS > lokasi yang diset di sini (NVS) > HOME_LAT/LON.
+  // Contoh: /location?lat=-6.2&lon=106.8   atau   /location?reset=1
+  web.on("/location", HTTP_GET, []() {
+    if (web.hasArg("reset")) {
+      clearWxLocation();
+      forceWeather = true;
+      Serial.println("[cuaca] lokasi di-reset ke default");
+    } else if (web.hasArg("lat") && web.hasArg("lon")) {
+      float la = web.arg("lat").toFloat();
+      float lo = web.arg("lon").toFloat();
+      if (la >= -90.0f && la <= 90.0f && lo >= -180.0f && lo <= 180.0f) {
+        saveWxLocation(la, lo);
+        forceWeather = true;
+        Serial.printf("[cuaca] lokasi diset: %.4f,%.4f\n", la, lo);
+      }
+    }
+    char out[96];
+    snprintf(out, sizeof(out), "{\"lat\":%.4f,\"lon\":%.4f,\"set\":%s}",
+             wxLat, wxLon, wxLocSet ? "true" : "false");
+    web.send(200, "application/json", out);
   });
 
   // notifikasi lewat GET: /notify?from=..&text=..
@@ -1576,7 +1816,7 @@ static void setupWeb() {
 
   web.on("/refresh", HTTP_GET, []() {
     forceWeather = true;
-    configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org");
+    configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org");
     Serial.println("[web] refresh cuaca + jam");
     web.send(200, "application/json", "{\"ok\":true}");
   });
@@ -1590,6 +1830,22 @@ static void setupWeb() {
     doc["heap"]     = ESP.getFreeHeap();
     doc["screen"]   = SCREEN_NAME[screen];
     doc["mood"]     = moodName(mood);
+    {
+      struct tm ct;
+      char tbuf[24];
+      if (localNow(&ct)) {
+        snprintf(tbuf, sizeof(tbuf), "%02d:%02d:%02d",
+                 ct.tm_hour, ct.tm_min, ct.tm_sec);
+        doc["time"]  = tbuf;
+        doc["epoch"] = (uint32_t)time(nullptr);
+      } else {
+        doc["time"] = "-";
+      }
+      doc["tz"] = TZ_STRING;
+    }
+    doc["wx_lat"]    = wxLat;
+    doc["wx_lon"]    = wxLon;
+    doc["wx_loc_set"] = wxLocSet;
     doc["last_fed"] = lastFed;
     doc["unread"]   = unreadCount;
     doc["messages"] = inboxCount;
@@ -1604,6 +1860,12 @@ static void setupWeb() {
       g["lat"] = gps.location.lat();
       g["lon"] = gps.location.lng();
     }
+    // Ekstra data untuk halaman /maps.
+    g["age_ms"]    = gps.location.age();
+    g["hdop"]      = gps.hdop.isValid() ? gps.hdop.hdop() : 0;
+    g["alt_m"]     = gps.altitude.isValid() ? gps.altitude.meters() : 0;
+    g["speed_kmh"] = gps.speed.isValid() ? gps.speed.kmph() : 0;
+    g["course"]    = gps.course.isValid() ? gps.course.deg() : 0;
     g["trip_km"] = tripKm;
 
     JsonObject w = doc["weather"].to<JsonObject>();
@@ -1637,10 +1899,19 @@ void setup() {
   if (storedMood >= (uint32_t)Mood::Count) storedMood = 0;
   mood = (Mood)storedMood;
   lastFed = nvsGet("fed", 0);
+
+  // Lokasi cuaca yang pernah diset dari web (dipakai kalau GPS tidak fix).
+  wxLocSet = prefs.getBool("wxlocset", false);
+  if (wxLocSet) {
+    wxLat = prefs.getFloat("wxlat", HOME_LAT);
+    wxLon = prefs.getFloat("wxlon", HOME_LON);
+  }
   faceHintUntil = millis() + 8000;
   lastInput = millis();
   Serial.printf("[mood] boot: %s (lastFed=%lu)\n",
                 moodName(mood), (unsigned long)lastFed);
+  Serial.printf("[cuaca] lokasi: %.4f,%.4f %s\n", wxLat, wxLon,
+                wxLocSet ? "(dari web)" : "(default)");
 
   if (HAS_BUTTON) {
     // Tombol ke GND aktif LOW; TTP223 aktif HIGH.

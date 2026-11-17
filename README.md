@@ -19,8 +19,9 @@ Sensor sentuh **TTP223** dipasang di GPIO3:
 - **Sentuh pendek** di wajah = elus. Mocha senang memberi hati; kalau marah,
   elus 3 kali membuatnya sedih; sedih/ngantuk langsung senang; kalau lapar,
   sekali sentuh langsung diberi makan.
-- **Tahan ±0,7 detik** di wajah = menu: Jam, Cuaca, Notif, Ubah mood,
-  Kasih makan, Tutup. Di menu, sentuh = pindah item, tahan = pilih.
+- **Tahan ±0,7 detik** (dari layar mana pun) = menu: Jam, Cuaca, **GPS/Peta**,
+  Notif, Ubah mood, Kasih makan, Tutup. Di menu, sentuh = pindah item, tahan = pilih.
+  Di pemilih mood ada pilihan **Batal (ke menu)** supaya selalu bisa kembali.
 - Mood dan waktu terakhir makan **tersimpan di NVS**, tetap ingat setelah reboot.
   Setelah 1 jam tidak diberi makan, mochi jadi lapar (diatur `HUNGER_SEC`).
 
@@ -134,7 +135,10 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 ## 4. Cara pakai
 
 - Layar pertama = **wajah mochi**: animasi **asli DASAI**, 90 frame bitmap
-  128x64 yang diputar 25 fps (frame-nya di `include/dasai_frames.h`).
+  128x64 (frame-nya di `include/dasai_frames.h`). Cara mainnya mengikuti
+ web The Mochi: potongan ekspresi acak diputar 16 fps, lalu ada jeda
+  acak 0,8–5 detik sebelum ekspresi berikutnya. Di web, GIF versi sama bisa
+  dilihat/diunduh di `http://192.168.1.8/mochi.gif`.
 - **ESP32 membuat hotspot sendiri** — tidak perlu router:
 
   | | |
@@ -146,12 +150,22 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
   Di HP: **Setelan → WiFi → mochi-dasai** → buka browser → `192.168.4.1`.
   (iPhone akan bilang "Tidak ada internet" — pilih **Tetap Sambung**, itu normal.)
 - Jam otomatis ikut **jam HP** begitu halaman web dibuka (dikirim lewat
-  `/time?epoch=...`), jadi tetap akurat walau tanpa internet.
+  `/time?epoch=...`), jadi tetap akurat walau tanpa internet. Zona waktu memakai
+  `configTzTime(TZ_STRING, ...)`, bukan `configTime(0,0,...)` — yang terakhir
+  diam-diam mengubah TZ jadi UTC sehingga jam tampil 7 jam lebih awal (dulu
+  terjadi setelah tombol **Refresh** / sinkron ulang tiap jam).
+- **Cuaca mengikuti lokasi.** Urutan prioritas: GPS (kalau ada fix) → lokasi yang
+  diset dari halaman web → `HOME_LAT`/`HOME_LON` di `config.h`. Karena GPS sering
+  tidak dapat sinyal di dalam ruangan, isi koordinatmu di halaman web
+  (**lokasi cuaca** → *Simpan lokasi*, atau tombol *Pakai lokasi HP*). Lokasi ini
+  tersimpan di NVS dan dipakai juga oleh peta di `/maps`. Cek lewat
+  `/location?reset=1` kalau mau kembali ke koordinat default.
 
   > Tanpa internet, cuaca & Telegram tidak jalan. `AP_ONLY` sudah `0`, jadi ESP32
   > jadi hotspot **dan** ikut WiFi rumah sekaligus. Isi `WIFI_SSID`/`WIFI_PASS`
   > di `include/config.h` dengan WiFi 2.4 GHz yang dipakai PC bridge.
-- `http://192.168.4.1/api/status` -> JSON status (layar aktif, gps, cuaca, heap, dll).
+- `http://192.168.4.1/api/status` -> JSON status (layar aktif, `time`, `tz`,
+  `wx_lat`/`wx_lon`, gps, cuaca, heap, dll) — cocok untuk cek jam & lokasi.
 - Bisa juga `http://mochi-01.local/` kalau mDNS jalan di jaringanmu.
 
 ### Kontrol sensor sentuh & konfigurasi
@@ -172,12 +186,16 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 | Endpoint | Fungsi |
 |---|---|
 | `/next` | pindah ke layar berikutnya |
-| `/refresh` | ambil ulang cuaca + sinkron jam (NTP) |
+| `/refresh` | ambil ulang cuaca + sinkron jam (NTP, zona waktu tetap WIB) |
+| `/location?lat=-6.2&lon=106.8` | set lokasi cuaca (tersimpan di NVS) |
+| `/location?reset=1` | kembali ke `HOME_LAT`/`HOME_LON` |
 | `/clear` | hapus semua notifikasi di inbox |
 | `/notify?from=..&text=..` | kirim notifikasi |
 | `/nav?kind=left&dist=200&road=..` | kirim perintah belokan ke layar GPS |
 | `/face?frame=45` | diagnosa: diamkan animasi DASAI di satu frame |
 | `/face?auto=1` | lanjutkan animasi wajah normal |
+| `/maps` (atau `/map`) | monitor GPS: peta Google Maps live + marker, auto-refresh 3 detik |
+| `/mochi.gif` | animasi mochi 90 frame dengan ekspresi + jeda acak |
 | `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`) |
 | `/feed` | kasih makan (langsung tampil animasi "Nyam") |
 
@@ -335,7 +353,7 @@ Catatan:
 
 ## 8. Batasan & ide lanjutan
 
-- C3 single core, tanpa PSRAM: animasi wajah 25 fps, layar lain 10 fps supaya bus I2C tidak penuh.
+- C3 single core, tanpa PSRAM: animasi wajah 16 fps (`FACE_FRAME_MS 60`), layar lain 10 fps supaya bus I2C tidak penuh.
 - Cuaca: Open-Meteo (gratis, tanpa API key), update tiap 10 menit.
 - GPS: kecepatan, satelit, HDOP, altitude, jarak tempuh (trip).
 - Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
@@ -349,14 +367,18 @@ format image2cpp), disimpan di `include/dasai_frames.h` sebagai PROGMEM
 (92 KB, aman untuk partisi Huge APP).
 
 Frame 0-12 itu fade in dan 59-89 fade out, jadi firmware hanya memutar frame
-13 sampai 58, bolak-balik (ping-pong) supaya sambungan loop tidak kelihatan dan
-wajah tidak pernah hilang jadi layar hitam.
+13 sampai 58. Supaya mirip web The Mochi, firmware memilih **potongan acak**
+(6–14 frame), memutarnya bolak-balik, lalu **jeda acak 0,8–5 detik** sebelum
+memilih ekspresi berikutnya. Perilaku yang sama dipakai untuk GIF di
+`include/mochi_gif.h` / `/mochi.gif`.
 
 | Mau ubah | Di mana |
 |---|---|
-| kecepatan animasi | `FACE_FRAME_MS` di `include/config.h` — 40 = 25 fps, 33 = 30 fps, 50 = 20 fps |
-| rentang frame | `FACE_LOOP_FIRST` / `FACE_LOOP_LAST` di `drawFace()` |
-| ganti frame animasi | generate ulang `include/dasai_frames.h` (script `gen_frames.ps1`) |
+| kecepatan animasi | `FACE_FRAME_MS` di `include/config.h` — 60 = 16 fps, 40 = 25 fps |
+| panjang ekspresi & jeda | `pickExpression()` di `drawFace()` (`src/main.cpp`) |
+| rentang frame | `FACE_LOOP_FIRST` / `FACE_LOOP_LAST` di `src/main.cpp` |
+| ganti frame animasi | generate ulang `include/dasai_frames.h` (jangan edit manual) |
+| generate ulang GIF | script `make_gif_random.py` (butuh Python + Pillow) |
 
 Kalau animasi terasa patah-patah, naikkan `FACE_FRAME_MS` ke 50.
 
