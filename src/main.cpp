@@ -1,0 +1,1842 @@
+/*
+ *  mochi dasai — jam, cuaca, GPS, notifikasi WhatsApp & Telegram
+ *  Target : ESP32-C3 Super Mini   + OLED SSD1306 128x64 (I2C)
+ *  GPS    : NEO-6M / ATGM336H / MAX-M10S
+ *
+ *  Layar  : tombol pendek = ganti layar, tombol lama = refresh / hapus notif
+ *           tanpa tombol: http://<ip>/next  /clear  /refresh  (ada tombolnya di web)
+ *  Notif  : GET/POST http://<ip>/notify?from=..&text=..
+ *  Status : GET http://<ip>/api/status
+ */
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <U8g2lib.h>
+#include <TinyGPSPlus.h>
+#include <WiFi.h>
+#include <esp_wifi.h>          // esp_wifi_set_max_tx_power / esp_wifi_set_ps
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <time.h>
+#include <sys/time.h>
+#include <math.h>
+#include <string.h>
+
+#include "../include/config.h"
+#include "../include/dasai_frames.h"   // 90 frame animasi mochi asli (PROGMEM)
+
+// ------------------------------------------------------------ objek global
+// clock/data ikut diberikan supaya U8g2 memakai pin I2C dari config.h
+// (urutan argumen U8g2: rotation, reset, clock/SCL, data/SDA)
+#if OLED_SH1106
+U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_SCL, PIN_SDA);
+#else
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_SCL, PIN_SDA);
+#endif
+TinyGPSPlus    gps;
+HardwareSerial gpsSerial(1);
+WebServer      web(80);
+WiFiClient     mqttNet;
+PubSubClient   mqtt(mqttNet);
+
+// ------------------------------------------------------------ konstanta
+static const char* DAY_ID[] = {"Min", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"};
+static const char* MON_ID[] = {"Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+                               "Jul", "Agu", "Sep", "Okt", "Nov", "Des"};
+
+enum Screen : uint8_t {
+  SCR_FACE, SCR_HOME, SCR_GPS, SCR_WX, SCR_MSG, SCR_SYS,
+  SCR_MENU, SCR_MOOD, SCR_EAT, SCR_COUNT
+};
+static Screen screen = SCR_FACE;
+
+static const char* SCREEN_NAME[] = {
+  "wajah", "jam", "gps", "cuaca", "notif", "sistem",
+  "menu", "ubah mood", "makan"
+};
+
+// ---- mood & interaksi ----
+enum class Mood : uint8_t { Happy = 0, Sad, Angry, Sleepy, Hungry, Count };
+enum class React : uint8_t { None = 0, Love, Shake };
+
+static const char* MOOD_NAME[] = {"Senang", "Sedih", "Marah", "Ngantuk", "Lapar"};
+static const char* moodName(Mood m) {
+  uint8_t i = (uint8_t)m;
+  return i < (uint8_t)Mood::Count ? MOOD_NAME[i] : MOOD_NAME[0];
+}
+
+static Mood  mood        = Mood::Happy;
+static React react       = React::None;
+static uint32_t reactUntil = 0;   // millis() akhir animasi reaksi
+static uint32_t faceHintUntil = 0;// millis() akhir petunjuk "tahan = menu"
+static uint32_t lastInput  = 0;   // input terakhir (auto-close menu)
+static uint32_t screenSince= 0;   // layar mulai (auto-close makan)
+static int    angryPets   = 0;    // elusan sebelum marah -> sedih
+static int    menuIndex   = 0;
+static int    moodIndex   = 0;
+static uint8_t noteIndex  = 0;
+
+static uint32_t lastFed   = 0;    // epoch terakhir diberi makan
+static bool     fedOffline= false;// sudah makan tapi jam belum siap
+static bool     hungerAnnounced = false;
+static Preferences prefs;         // NVS: mood + waktu makan bertahan saat reboot
+
+static const uint8_t INBOX_MAX = 8;
+
+struct Note {
+  char src[4];
+  char from[20];
+  char text[72];
+  uint32_t epoch;
+  bool unread;
+};
+
+static Note    inbox[INBOX_MAX];
+static uint8_t inboxCount = 0;
+static uint8_t unreadCount = 0;
+
+struct Weather {
+  bool     valid;
+  float    temp, feels, rh, wind;
+  int      code;
+  uint32_t updated;
+};
+static Weather wx = {false, NAN, NAN, NAN, NAN, -1, 0};
+
+static uint32_t gpsChars = 0;
+static double   tripKm = 0;
+static double   lastLat = 0, lastLon = 0;
+static bool     haveLastPos = false;
+static bool     forceWeather = false;
+
+// ---- perintah belokan (dikirim HP lewat /nav), bikin layar GPS jadi penunjuk arah
+enum NavKind : uint8_t {
+  NAV_STRAIGHT, NAV_LEFT, NAV_RIGHT, NAV_SLIGHT_LEFT,
+  NAV_SLIGHT_RIGHT, NAV_UTURN, NAV_ROUNDABOUT
+};
+
+struct NavStep {
+  bool     valid;
+  uint8_t  kind;
+  uint16_t dist;      // meter
+  char     road[26];
+  uint32_t at;        // millis() saat diterima
+};
+static NavStep nav = {false, NAV_STRAIGHT, 0, "", 0};
+static const uint32_t NAV_TTL_MS = 5UL * 60UL * 1000UL;   // 5 menit
+
+static bool     apOk    = false;   // hasil WiFi.softAP()
+static uint32_t frameMs = 0;       // lama kirim 1 frame ke OLED
+
+// ------------------------------------------------------------ utilitas
+static bool localNow(struct tm* out) {
+  time_t now = time(nullptr);
+  if (now < 1700000000) return false;
+  if (out) localtime_r(&now, out);
+  return true;
+}
+
+/* buang newline, emoji, dan spasi berlebih supaya aman di OLED */
+static void sanitize(char* dst, size_t n, const char* src) {
+  if (!src) src = "";
+  size_t o = 0;
+  bool lastSpace = true;
+  char lastCh = 0;
+  for (size_t i = 0; src[i] && o + 1 < n; ++i) {
+    unsigned char c = (unsigned char)src[i];
+    if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+    if (c < 32 || c > 126) c = '?';
+    if (c == ' ' && lastSpace) continue;
+    if (c == '?' && lastCh == '?') continue;
+    dst[o++] = (char)c;
+    lastSpace = (c == ' ');
+    lastCh = (char)c;
+  }
+  while (o > 0 && dst[o - 1] == ' ') o--;
+  dst[o] = 0;
+}
+
+static const char* wxText(int code) {
+  if (code < 0)                              return "belum ada data";
+  if (code == 0)                             return "Cerah";
+  if (code <= 2)                             return "Cerah berawan";
+  if (code == 3)                             return "Mendung";
+  if (code == 45 || code == 48)              return "Berkabut";
+  if (code >= 51 && code <= 57)              return "Gerimis";
+  if (code >= 61 && code <= 67)              return "Hujan";
+  if (code >= 71 && code <= 77)              return "Salju";
+  if (code >= 80 && code <= 82)              return "Hujan lebat";
+  if (code == 85 || code == 86)              return "Hujan salju";
+  if (code >= 95)                            return "Badai guntur";
+  return "Cuaca tak dikenal";
+}
+
+static void beep() {
+  if (!HAS_BUZZER) return;
+  // buzzer aktif: cukup pulse. Kalau punya buzzer pasif, tone() tetap bunyi.
+  tone(PIN_BUZZ, 2600, 70);
+}
+
+static void addNotification(const char* src, const char* from, const char* text) {
+  for (int i = INBOX_MAX - 1; i > 0; --i) inbox[i] = inbox[i - 1];
+  sanitize(inbox[0].src, sizeof(inbox[0].src), (src && *src) ? src : "?");
+  sanitize(inbox[0].from, sizeof(inbox[0].from), (from && *from) ? from : "Tanpa nama");
+  sanitize(inbox[0].text, sizeof(inbox[0].text), (text && *text) ? text : "(kosong)");
+  inbox[0].epoch  = (uint32_t)time(nullptr);
+  inbox[0].unread = true;
+  if (inboxCount < INBOX_MAX) inboxCount++;
+  if (unreadCount < 99) unreadCount++;
+  beep();
+  Serial.printf("[%s] %s: %s\n", inbox[0].src, inbox[0].from, inbox[0].text);
+}
+
+static void markAllRead() {
+  unreadCount = 0;
+  for (uint8_t i = 0; i < INBOX_MAX; ++i) inbox[i].unread = false;
+}
+
+static void clearInbox() {
+  inboxCount = 0;
+  unreadCount = 0;
+  noteIndex = 0;
+  for (uint8_t i = 0; i < INBOX_MAX; ++i) inbox[i].text[0] = 0;
+}
+
+// ------------------------------------------------------------ mood / NVS
+static void nvsBegin() { prefs.begin("mochi", false); }
+static uint32_t nvsGet(const char* key, uint32_t def) { return prefs.getUInt(key, def); }
+static void nvsSet(const char* key, uint32_t val) { prefs.putUInt(key, val); }
+
+static void goFace() {
+  screen = SCR_FACE;
+  faceHintUntil = millis() + 6000;
+  beep();
+}
+
+static void openMenu() {
+  screen = SCR_MENU;
+  menuIndex = 0;
+  lastInput = millis();
+  beep();
+}
+
+static void setMood(Mood next) {
+  mood = next;
+  nvsSet("mood", (uint32_t)next);
+  if (next != Mood::Angry) angryPets = 0;
+  Serial.printf("[mood] %s\n", moodName(next));
+}
+
+static void markFed() {
+  fedOffline = true;           // tandai dulu kalau jam belum siap
+  hungerAnnounced = false;
+  if (localNow(nullptr)) {
+    lastFed = (uint32_t)time(nullptr);
+    nvsSet("fed", lastFed);
+    fedOffline = false;
+  }
+}
+
+static void updateHunger() {
+  if (!localNow(nullptr)) return;
+  uint32_t nowEpoch = (uint32_t)time(nullptr);
+
+  if (fedOffline || lastFed == 0) {
+    lastFed = nowEpoch;
+    nvsSet("fed", lastFed);
+    fedOffline = false;
+    hungerAnnounced = false;
+    return;
+  }
+
+  bool due = nowEpoch > lastFed && (nowEpoch - lastFed) >= HUNGER_SEC;
+  if (!due) { hungerAnnounced = false; return; }
+
+  if (!hungerAnnounced) {
+    hungerAnnounced = true;
+    if (screen == SCR_FACE && (mood == Mood::Happy || mood == Mood::Sleepy))
+      setMood(Mood::Hungry);
+  }
+}
+
+static void onFaceTap() {
+  uint32_t now = millis();
+  if (mood == Mood::Hungry) {              // lapar -> langsung kasih makan
+    screen = SCR_EAT;
+    screenSince = now;
+    markFed();
+    return;
+  }
+  if (mood == Mood::Angry) {               // elus 3x -> jadi sedih
+    angryPets++;
+    react = React::Shake;
+    reactUntil = now + 700;
+    if (angryPets >= 3) setMood(Mood::Sad);
+    return;
+  }
+  if (mood == Mood::Sad || mood == Mood::Sleepy) setMood(Mood::Happy);
+  react = React::Love;
+  reactUntil = now + 1400;
+}
+
+enum MenuItem : uint8_t {
+  MENU_CLOCK = 0, MENU_WEATHER, MENU_NOTIF, MENU_MOOD, MENU_FEED, MENU_CLOSE, MENU_COUNT
+};
+static const char* MENU_LABEL[] = {
+  "Jam", "Cuaca", "Notif", "Ubah mood", "Kasih makan", "Tutup"
+};
+
+static void onMenuSelect() {
+  switch (menuIndex) {
+    case MENU_CLOCK:
+      screen = SCR_HOME;
+      break;
+    case MENU_WEATHER:
+      screen = SCR_WX;
+      forceWeather = true;
+      break;
+    case MENU_NOTIF:
+      screen = SCR_MSG;
+      noteIndex = 0;
+      markAllRead();
+      break;
+    case MENU_MOOD:
+      screen = SCR_MOOD;
+      moodIndex = (int)mood;
+      if (moodIndex < 0 || moodIndex >= (int)Mood::Count) moodIndex = 0;
+      break;
+    case MENU_FEED:
+      screen = SCR_EAT;
+      screenSince = millis();
+      markFed();
+      return;
+    default:
+      goFace();
+      return;
+  }
+  lastInput = millis();
+}
+
+// ------------------------------------------------------------ WiFi / waktu
+static void onWifiEvent(WiFiEvent_t ev, WiFiEventInfo_t info) {
+  if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    Serial.printf("[wifi] putus, reason=%u\n",
+                  (unsigned)info.wifi_sta_disconnected.reason);
+  } else if (ev == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    Serial.printf("[wifi] dapat IP %s\n", WiFi.localIP().toString().c_str());
+  }
+}
+
+static bool    wifiHaveAp  = false;
+static uint8_t wifiChannel = 0;
+static uint8_t wifiBssid[6] = {0};
+
+// Scan sekali untuk mendapat channel + BSSID. Menyambung dengan BSSID yang
+// dipatok menghindari "reason=201 NO_AP_FOUND" yang muncul saat driver
+// gagal menemukan AP-nya sendiri di tengah proses connect.
+static void findAp() {
+  Serial.println("[wifi] scan AP...");
+  int n = WiFi.scanNetworks(false, true);
+  int best = -1, bestRssi = -127;
+  for (int i = 0; i < n; ++i) {
+    if (WiFi.SSID(i) == WIFI_SSID && (int)WiFi.RSSI(i) > bestRssi) {
+      best = i;
+      bestRssi = (int)WiFi.RSSI(i);
+    }
+  }
+  if (best >= 0) {
+    wifiChannel = (uint8_t)WiFi.channel(best);
+    memcpy(wifiBssid, WiFi.BSSID(best), 6);
+    wifiHaveAp = true;
+    Serial.printf("[wifi] AP ketemu ch%u rssi=%d bssid=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  wifiChannel, bestRssi,
+                  wifiBssid[0], wifiBssid[1], wifiBssid[2],
+                  wifiBssid[3], wifiBssid[4], wifiBssid[5]);
+  } else {
+    Serial.println("[wifi] AP tidak ada di scan (5GHz-only? terlalu jauh?)");
+  }
+  WiFi.scanDelete();
+  delay(100);
+}
+
+static void wifiTask() {
+  if (AP_ONLY) return;                 // mode hotspot saja: tidak perlu router
+  static uint32_t lastTry = 0;
+  static uint8_t  tries   = 0;
+  static bool     started = false;
+
+  if (WiFi.status() == WL_CONNECTED) return;
+  uint32_t now = millis();
+  if (started && now - lastTry < 15000) return;
+  started = true;
+  lastTry = now;
+  tries++;
+
+  Serial.printf("[wifi] menyambung ke \"%s\" (coba %u)...\n", WIFI_SSID, tries);
+  if (tries > 1) {
+    WiFi.disconnect();
+    delay(150);
+  }
+  if (tries == 1) findAp();
+
+  if (wifiHaveAp) WiFi.begin(WIFI_SSID, WIFI_PASS, wifiChannel, wifiBssid, true);
+  else            WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  if (tries == 6)
+    Serial.println("[wifi] masih gagal -> coba hotspot HP (2.4 GHz) & hapus NVS");
+}
+
+// konversi UTC -> epoch tanpa bergantung pada timegm()
+static time_t utcEpoch(int year, int mon, int day, int hour, int minute, int second) {
+  static const uint8_t mdays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int64_t days = 0;
+  for (int y = 1970; y < year; ++y)
+    days += ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 366 : 365;
+  for (int m = 0; m < mon - 1; ++m) {
+    days += mdays[m];
+    if (m == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) days += 1;
+  }
+  days += day - 1;
+  return (time_t)(days * 86400LL + hour * 3600LL + minute * 60LL + second);
+}
+
+static void timeTask() {
+  static bool     ntpStarted = false;
+  static uint32_t lastSync   = 0;
+
+  if (WiFi.status() != WL_CONNECTED) { ntpStarted = false; return; }
+
+  if (!ntpStarted) {
+    configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org", "time.google.com");
+    setenv("TZ", TZ_STRING, 1);
+    tzset();
+    ntpStarted = true;
+    lastSync   = millis();
+    return;
+  }
+
+  if (localNow(nullptr)) {
+    if (millis() - lastSync > 3600000UL) {   // resync tiap jam
+      configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org");
+      lastSync = millis();
+    }
+    return;
+  }
+
+  // belum dapat NTP -> ambil jam dari GPS (GPS = UTC)
+  if (gps.date.isValid() && gps.time.isValid() &&
+      gps.time.age() < 2000 && gps.date.age() < 2000) {
+    time_t epoch = utcEpoch(gps.date.year(), gps.date.month(), gps.date.day(),
+                            gps.time.hour(), gps.time.minute(), gps.time.second());
+    if (epoch > 1700000000) {
+      struct timeval tv = { epoch, 0 };
+      settimeofday(&tv, nullptr);
+      tzset();
+      Serial.println("[jam] diset dari GPS");
+    }
+  }
+}
+
+// ------------------------------------------------------------ cuaca
+static bool fetchWeather(float lat, float lon) {
+  WiFiClientSecure tls;
+  tls.setInsecure();                       // open-meteo tanpa pinning
+
+  HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(8000);
+
+  char url[260];
+  snprintf(url, sizeof(url),
+           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+           "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+           "weather_code,wind_speed_10m&timezone=auto",
+           lat, lon);
+
+  if (!http.begin(tls, url)) {
+    Serial.println("[cuaca] begin gagal");
+    return false;
+  }
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[cuaca] HTTP %d\n", code);
+    http.end();
+    return false;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err) {
+    Serial.printf("[cuaca] json: %s\n", err.c_str());
+    return false;
+  }
+
+  JsonObject cur = doc["current"];
+  if (cur.isNull()) return false;
+
+  float t = cur["temperature_2m"] | NAN;
+  if (isnan(t)) return false;
+
+  wx.temp    = t;
+  wx.rh      = cur["relative_humidity_2m"] | 0.0f;
+  wx.feels   = cur["apparent_temperature"]  | t;
+  wx.wind    = cur["wind_speed_10m"]        | 0.0f;
+  wx.code    = cur["weather_code"]          | -1;
+  wx.updated = millis();
+  wx.valid   = true;
+
+  Serial.printf("[cuaca] %.1fC  %d%%  %s\n", wx.temp, (int)wx.rh, wxText(wx.code));
+  return true;
+}
+
+static void weatherTask() {
+  static uint32_t lastTry = 0;
+
+  if (forceWeather) { forceWeather = false; lastTry = 0; }
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  uint32_t now      = millis();
+  uint32_t interval = wx.valid ? 600000UL : 15000UL;  // 10 menit / coba 15 detik
+  if (lastTry != 0 && now - lastTry < interval) return;
+  lastTry = now;
+
+  float lat = HOME_LAT, lon = HOME_LON;
+  if (gps.location.isValid() && gps.location.age() < 15000) {
+    lat = (float)gps.location.lat();
+    lon = (float)gps.location.lng();
+  }
+  fetchWeather(lat, lon);
+}
+
+// ------------------------------------------------------------ MQTT
+static bool mqttEnabled() { return strlen(MQTT_HOST) > 0; }
+
+static void onMqttMessage(char* topic, byte* payload, unsigned int len) {
+  (void)topic;
+  char buf[96];
+  size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+  memcpy(buf, payload, n);
+  buf[n] = 0;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, buf) == DeserializationError::Ok &&
+      doc["text"].is<const char*>()) {
+    const char* from = doc["from"] | "MQTT";
+    addNotification("MQ", from, doc["text"] | "");
+  } else {
+    addNotification("MQ", "MQTT", buf);
+  }
+}
+
+static void mqttTask() {
+  if (!mqttEnabled()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  static uint32_t lastTry = 0;
+
+  if (!mqtt.connected()) {
+    uint32_t now = millis();
+    if (lastTry != 0 && now - lastTry < 5000) return;
+    lastTry = now;
+
+    String cid = String("mochi-") + DEVICE_ID + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+    bool ok = strlen(MQTT_USER) > 0
+                  ? mqtt.connect(cid.c_str(), MQTT_USER, MQTT_PASS)
+                  : mqtt.connect(cid.c_str());
+
+    if (ok) {
+      String sub = String("mochi/") + DEVICE_ID + "/notify";
+      String st  = String("mochi/") + DEVICE_ID + "/status";
+      mqtt.subscribe(sub.c_str());
+      mqtt.publish(st.c_str(), "online", true);
+      Serial.printf("[mqtt] tersambung, subscribe %s\n", sub.c_str());
+    }
+  }
+  mqtt.loop();
+}
+
+// ------------------------------------------------------------ Telegram
+static bool telegramEnabled() { return strlen(TELEGRAM_TOKEN) > 20; }
+
+/*
+ *  Long polling ringan: tiap 4 detik tanya getUpdates (timeout=0, koneksi
+ *  TLS dipakai ulang). Saat pertama kali connect, tumpukan update lama
+ *  dibuang supaya inbox tidak dibanjiri pesan 24 jam terakhir.
+ */
+static void telegramTask() {
+  if (!telegramEnabled()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  static uint32_t lastTry = 0;
+  static uint32_t wait    = 4000;
+  static long     offset  = 0;
+  static bool     primed  = false;
+  static WiFiClientSecure tls;
+  static HTTPClient http;
+  static bool     tlsInit = false;
+
+  uint32_t now = millis();
+  if (lastTry != 0 && now - lastTry < wait) return;
+  lastTry = now;
+
+  if (!tlsInit) {
+    tls.setInsecure();
+    http.setReuse(true);
+    http.setConnectTimeout(5000);
+    http.setTimeout(8000);
+    tlsInit = true;
+  }
+
+  char url[200];
+  snprintf(url, sizeof(url),
+           "https://api.telegram.org/bot%s/getUpdates?timeout=0&limit=10&offset=%ld",
+           TELEGRAM_TOKEN, primed ? offset : -1L);
+
+  if (!http.begin(tls, url)) return;
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    Serial.printf("[tg] HTTP %d\n", code);
+    if (code < 0) tlsInit = false;          // paksa handshake baru lain kali
+    wait = wait < 30000 ? wait * 2 : 60000; // backoff kalau server bermasalah
+    return;
+  }
+  wait = 4000;
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  if (deserializeJson(doc, payload) != DeserializationError::Ok) return;
+  if (!(doc["ok"] | false)) {
+    Serial.printf("[tg] %s\n", (const char*)(doc["description"] | "error"));
+    return;
+  }
+
+  JsonArray res = doc["result"];
+  for (JsonVariant uv : res) {
+    JsonObject u = uv.as<JsonObject>();
+    if (u.isNull()) continue;
+    long id = u["update_id"] | 0L;
+    if (id >= offset) offset = id + 1;
+    if (!primed) continue;            // buang backlog saat boot
+
+    JsonObject m = u["message"];
+    if (m.isNull()) continue;
+
+    JsonObject chat = m["chat"];
+    const char* name = chat["title"] | "";
+    if (!*name) name = m["from"]["first_name"] | "";
+    if (!*name) name = m["from"]["username"]  | "";
+    if (!*name) name = "Telegram";
+
+    const char* text = m["text"] | "";
+    if (!*text) text = "[media]";
+
+    addNotification("TG", name, text);
+  }
+  primed = true;
+}
+
+// ------------------------------------------------------------ GPS
+static void pumpGps() {
+  uint16_t budget = 256;
+  while (gpsSerial.available() > 0 && budget--) {
+    gps.encode((char)gpsSerial.read());
+    gpsChars++;
+  }
+
+  if (gps.location.isUpdated()) {
+    if (haveLastPos) {
+      double d = TinyGPSPlus::distanceBetween(lastLat, lastLon,
+                                              gps.location.lat(), gps.location.lng());
+      if (d > 3.0 && d < 500.0) tripKm += d / 1000.0;
+    }
+    lastLat = gps.location.lat();
+    lastLon = gps.location.lng();
+    haveLastPos = true;
+  }
+}
+
+// ------------------------------------------------------------ gambar
+static void drawTrunc(int x, int y, const char* s, int maxChars) {
+  char b[80];
+  strncpy(b, s, sizeof(b) - 1);
+  b[sizeof(b) - 1] = 0;
+  int n = (int)strlen(b);
+  if (n > maxChars && maxChars >= 4) {
+    b[maxChars - 3] = '.';
+    b[maxChars - 2] = '.';
+    b[maxChars - 1] = '.';
+    b[maxChars]     = 0;
+  }
+  oled.drawStr(x, y, b);
+}
+
+static void drawStatusBar() {
+  oled.setFont(u8g2_font_5x7_tf);
+  char b[32];
+  int sats = gps.satellites.isValid() ? (int)gps.satellites.value() : 0;
+  snprintf(b, sizeof(b), "%s sat%02d%s",
+           WiFi.status() == WL_CONNECTED ? "wifi" : "ap",
+           sats,
+           mqtt.connected() ? " mq" : "");
+  oled.drawStr(0, 63, b);
+
+  if (unreadCount) {
+    char u[10];
+    snprintf(u, sizeof(u), "msg%u", (unsigned)unreadCount);
+    oled.drawStr(127 - oled.getStrWidth(u), 63, u);
+  }
+}
+
+// ------------------------------------------------------------ wajah mochi
+// Animasi ASLI mochi dasai: 90 frame bitmap 128x64 dari klip RIVE resmi,
+// diekspor ke include/dasai_frames.h (sumber: github.com/upiir/esp32s3_oled_dasai_mochi).
+//
+// Frame 0-12 itu fade in dan frame 59-89 fade out, jadi yang diputar hanya
+// 13..58 dan bolak-balik (ping-pong) supaya sambungan loop-nya tidak kelihatan
+// dan wajah tidak pernah hilang jadi layar hitam.
+#define FACE_LOOP_FIRST 13
+#define FACE_LOOP_LAST  58
+
+static int16_t  faceFrozen = -1;   // >= 0 = tampilkan 1 frame saja (diagnosa /face)
+
+// ---- wajah mood (digambar sendiri, bukan bitmap DASAI) ----
+// Dipakai saat mood bukan Senang, saat sedang makan, atau saat ada reaksi
+// elus/marah. Gambar langsung ke buffer oled (render() yang clear & send).
+static void miniHeart(int x, int y) {
+  oled.drawDisc(x - 3, y, 3);
+  oled.drawDisc(x + 3, y, 3);
+  oled.drawTriangle(x - 6, y + 1, x + 6, y + 1, x, y + 8);
+}
+
+static void drawMoodFace(uint32_t now) {
+  bool eating = (screen == SCR_EAT);
+  bool hearts = (react == React::Love && now < reactUntil && !eating);
+  bool shake  = (react == React::Shake && now < reactUntil);
+
+  oled.setDrawColor(1);
+  oled.setFont(u8g2_font_5x7_tf);
+
+  const char* caption = moodName(mood);
+  if (eating)    caption = "Nyam";
+  else if (hearts) caption = "Elus";
+  else if (shake)  caption = "Hmph";
+  oled.drawStr(0, 8, caption);
+
+  int right = 127;
+  if (unreadCount) {
+    char badge[4];
+    snprintf(badge, sizeof(badge), "%u", unreadCount > 9 ? 9 : unreadCount);
+    int bw = oled.getStrWidth(badge);
+    oled.drawStr(128 - bw, 8, badge);
+    right = 128 - bw - 3;
+    oled.drawCircle(right - 2, 5, 3);
+    right -= 10;
+  }
+  struct tm t;
+  if (localNow(&t)) {
+    char hm[8];
+    snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+    int tw = oled.getStrWidth(hm);
+    int x = right - tw;
+    if (x < 40) x = 40;
+    oled.drawStr(x, 8, hm);
+  }
+
+  int sh = 0;
+  if (shake || mood == Mood::Angry) sh = ((now / 70) % 2) ? -2 : 2;
+  int bob = 0;
+  if (mood != Mood::Sleepy && mood != Mood::Angry) {
+    static const int8_t kBob[] = {0, 1, 2, 1};
+    bob = kBob[(now / 200) % 4];
+  }
+  int cx = 64 + sh;
+  int cy = 35 + bob;
+
+  // badan + kaki
+  oled.setDrawColor(1);
+  oled.drawFilledEllipse(cx, cy, 26, 17, U8G2_DRAW_ALL);
+  oled.drawFilledEllipse(cx - 10, cy + 15, 6, 3, U8G2_DRAW_ALL);
+  oled.drawFilledEllipse(cx + 10, cy + 15, 6, 3, U8G2_DRAW_ALL);
+
+  // mata
+  int ey = cy - 5, lx = cx - 12, rx = cx + 12;
+  bool blink = (now % 3800) < 140;
+  oled.setDrawColor(0);
+  if (hearts) {
+    miniHeart(lx, ey - 1);
+    miniHeart(rx, ey - 1);
+  } else if (mood == Mood::Sleepy) {
+    oled.drawBox(lx - 6, ey, 12, 2);
+    oled.drawBox(rx - 6, ey, 12, 2);
+  } else if (blink || (eating && ((now / 160) % 2) == 0)) {
+    oled.drawHLine(lx - 5, ey, 10);
+    oled.drawHLine(rx - 5, ey, 10);
+  } else {
+    oled.drawDisc(lx, ey, 4);
+    oled.drawDisc(rx, ey, 4);
+    oled.setDrawColor(1);
+    oled.drawPixel(lx - 1, ey - 2);
+    oled.drawPixel(rx - 1, ey - 2);
+    oled.setDrawColor(0);
+    if (mood == Mood::Angry) {
+      oled.drawLine(lx - 9, ey - 9, lx + 5, ey - 4);
+      oled.drawLine(lx - 9, ey - 8, lx + 5, ey - 3);
+      oled.drawLine(rx + 9, ey - 9, rx - 5, ey - 4);
+      oled.drawLine(rx + 9, ey - 8, rx - 5, ey - 3);
+    } else if (mood == Mood::Sad) {
+      oled.drawLine(lx - 8, ey - 3, lx + 5, ey - 9);
+      oled.drawLine(rx + 8, ey - 3, rx - 5, ey - 9);
+    }
+  }
+
+  // mulut
+  int my = cy + 7;
+  oled.setDrawColor(0);
+  if (eating) {
+    int h = ((now / 160) % 2) == 0 ? 6 : 2;
+    oled.drawFilledEllipse(cx, my, 7, h, U8G2_DRAW_ALL);
+    if (h > 3) {
+      oled.setDrawColor(1);
+      oled.drawBox(cx - 4, my - 1, 8, 2);
+      oled.setDrawColor(0);
+    }
+  } else {
+    switch (mood) {
+      case Mood::Sad:
+        oled.drawEllipse(cx, my + 5, 7, 4, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_UPPER_RIGHT);
+        break;
+      case Mood::Angry:
+        oled.drawHLine(cx - 6, my + 1, 13);
+        oled.drawLine(cx - 6, my + 1, cx - 9, my + 4);
+        oled.drawLine(cx + 6, my + 1, cx + 9, my + 4);
+        break;
+      case Mood::Sleepy:
+        oled.drawHLine(cx - 4, my + 2, 8);
+        break;
+      case Mood::Hungry:
+        oled.drawFilledEllipse(cx, my + 1, 3, 3, U8G2_DRAW_ALL);
+        break;
+      default:
+        oled.drawEllipse(cx, my - 1, 8, 5, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
+        break;
+    }
+  }
+
+  // aksesoris sesuai mood
+  if (mood == Mood::Happy || hearts || mood == Mood::Hungry) {
+    oled.setDrawColor(0);
+    oled.drawDisc(cx - 18, cy + 3, 2);
+    oled.drawDisc(cx + 18, cy + 3, 2);
+  }
+  if (mood == Mood::Sad && !hearts) {
+    int drop = 20 + (int)((now / 140) % 18);
+    oled.setDrawColor(1);
+    oled.drawDisc(cx + 32, drop, 1);
+  }
+  if (mood == Mood::Sleepy) {
+    oled.setDrawColor(1);
+    oled.setFont(u8g2_font_6x10_tf);
+    int lift = (int)((now / 350) % 8);
+    oled.drawStr(cx + 24, 22 - lift, "z");
+  }
+  if (hearts) {
+    oled.setDrawColor(1);
+    int hop = (int)((now / 180) % 5);
+    miniHeart(16, 16 - hop);
+    miniHeart(112, 18 - hop);
+  }
+  if (eating) {
+    oled.setDrawColor(1);
+    int step = (int)((now / 180) % 5);
+    oled.drawBox(cx - 22 + step * 4, 16 + step, 2, 2);
+  }
+  if (now < faceHintUntil && !eating) {
+    oled.setDrawColor(1);
+    oled.setFont(u8g2_font_5x7_tf);
+    const char* hint = "tahan = menu";
+    oled.drawStr((128 - oled.getStrWidth(hint)) / 2, 63, hint);
+  }
+  oled.setDrawColor(1);
+}
+
+static void drawFace() {
+  static int16_t  f    = FACE_LOOP_FIRST;
+  static int8_t   dir  = 1;
+  static uint32_t last = 0;
+  uint32_t now = millis();
+
+  // habis reaksi, kembalikan ke wajah DASAI kalau mood-nya Senang
+  if (react != React::None && now >= reactUntil) react = React::None;
+
+  if (faceFrozen >= 0) {
+    oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
+                  dasaiFrame((uint8_t)faceFrozen));
+    return;
+  }
+
+  if (screen == SCR_EAT || mood != Mood::Happy || react != React::None) {
+    drawMoodFace(now);
+    return;
+  }
+
+  if (now - last >= FACE_FRAME_MS) {
+    last = now;
+    f += dir;
+    if (f >= FACE_LOOP_LAST)       { f = FACE_LOOP_LAST;  dir = -1; }
+    else if (f <= FACE_LOOP_FIRST) { f = FACE_LOOP_FIRST; dir =  1; }
+  }
+
+  oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H, dasaiFrame((uint8_t)f));
+}
+
+static void drawHome() {
+  struct tm t;
+  bool tOK = localNow(&t);
+  char b[40];
+
+  oled.setFont(u8g2_font_6x10_tf);
+  if (tOK)
+    snprintf(b, sizeof(b), "%s %02d %s", DAY_ID[t.tm_wday], t.tm_mday, MON_ID[t.tm_mon]);
+  else
+    snprintf(b, sizeof(b), "sinkron waktu...");
+  oled.drawStr(0, 9, b);
+
+  if (unreadCount) {
+    snprintf(b, sizeof(b), "MSG %u", (unsigned)unreadCount);
+    oled.drawStr(127 - oled.getStrWidth(b), 9, b);
+  }
+
+  // jam besar
+  char hm[8];
+  if (tOK) snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+  else     snprintf(hm, sizeof(hm), "--:--");
+
+  oled.setFont(u8g2_font_logisoso26_tn);
+  int w = oled.getStrWidth(hm);
+  oled.drawStr(0, 40, hm);
+
+  // suhu di kanan
+  int tempX = 128;
+  if (wx.valid) {
+    char tb[8];
+    snprintf(tb, sizeof(tb), "%.0f", wx.temp);
+    oled.setFont(u8g2_font_helvB14_tf);
+    int tw = oled.getStrWidth(tb);
+    tempX  = 127 - tw - 12;
+    oled.drawStr(tempX, 40, tb);
+    oled.drawDisc(tempX + tw + 3, 30, 1);
+    oled.drawStr(tempX + tw + 6, 40, "C");
+  }
+
+  // detik kalau masih ada ruang
+  if (tOK && w + 22 < tempX) {
+    oled.setFont(u8g2_font_6x10_tf);
+    snprintf(b, sizeof(b), "%02d", t.tm_sec);
+    oled.drawStr(w + 4, 40, b);
+  }
+
+  // baris cuaca
+  oled.setFont(u8g2_font_6x10_tf);
+  if (wx.valid) {
+    oled.drawStr(0, 53, wxText(wx.code));
+    snprintf(b, sizeof(b), "%d%%", (int)roundf(wx.rh));
+    oled.drawStr(127 - oled.getStrWidth(b), 53, b);
+  } else {
+    oled.drawStr(0, 53, "cuaca: menunggu");
+  }
+
+  drawStatusBar();
+}
+
+// ---- ikon belokan: panah besar, digambar dari segitiga + kotak
+static void thickLine(int x0, int y0, int x1, int y1, int w) {
+  int dx = x1 - x0, dy = y1 - y0;
+  for (int i = -w / 2; i <= w / 2; i++) {
+    if (dx > dy) oled.drawLine(x0, y0 + i, x1, y1 + i);
+    else         oled.drawLine(x0 + i, y0, x1 + i, y1);
+  }
+}
+
+static void drawTurnIcon(int cx, int cy, uint8_t kind) {
+  switch (kind) {
+    case NAV_LEFT:
+      oled.drawTriangle(cx - 17, cy, cx - 1, cy - 12, cx - 1, cy + 12);
+      oled.drawBox(cx - 2, cy - 5, 19, 10);
+      break;
+
+    case NAV_RIGHT:
+      oled.drawTriangle(cx + 17, cy, cx + 1, cy - 12, cx + 1, cy + 12);
+      oled.drawBox(cx - 17, cy - 5, 19, 10);
+      break;
+
+    case NAV_SLIGHT_LEFT:
+      thickLine(cx + 12, cy + 17, cx - 6, cy - 5, 9);
+      oled.drawTriangle(cx - 13, cy - 15, cx - 1, cy - 9, cx - 9, cy + 2);
+      break;
+
+    case NAV_SLIGHT_RIGHT:
+      thickLine(cx - 12, cy + 17, cx + 6, cy - 5, 9);
+      oled.drawTriangle(cx + 13, cy - 15, cx + 1, cy - 9, cx + 9, cy + 2);
+      break;
+
+    case NAV_UTURN:
+      oled.drawEllipse(cx, cy - 4, 11, 10,
+                       U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_UPPER_RIGHT);
+      oled.drawBox(cx - 12, cy - 5, 6, 20);          // kaki kiri turun
+      oled.drawBox(cx + 6, cy - 5, 6, 9);            // kaki kanan pendek
+      oled.drawTriangle(cx + 9, cy + 14, cx + 2, cy + 4, cx + 16, cy + 4);
+      break;
+
+    case NAV_ROUNDABOUT:
+      oled.drawCircle(cx - 2, cy, 11);
+      oled.drawDisc(cx - 2, cy, 4);
+      oled.drawBox(cx + 12, cy - 4, 12, 8);          // jalan keluar
+      oled.drawTriangle(cx + 19, cy + 9, cx + 8, cy + 2, cx + 8, cy + 16);
+      break;
+
+    default:  // NAV_STRAIGHT
+      oled.drawTriangle(cx, cy - 17, cx - 12, cy + 1, cx + 12, cy + 1);
+      oled.drawBox(cx - 5, cy - 1, 10, 19);
+      break;
+  }
+}
+
+static const char* navText(uint8_t kind) {
+  switch (kind) {
+    case NAV_LEFT:         return "BELOK KIRI";
+    case NAV_RIGHT:        return "BELOK KANAN";
+    case NAV_SLIGHT_LEFT:  return "AGAK KIRI";
+    case NAV_SLIGHT_RIGHT: return "AGAK KANAN";
+    case NAV_UTURN:        return "PUTAR BALIK";
+    case NAV_ROUNDABOUT:   return "BUNDARAN";
+    default:               return "LURUS";
+  }
+}
+
+static bool navActive() {
+  return nav.valid && (millis() - nav.at) < NAV_TTL_MS;
+}
+
+static void drawGps() {
+  bool fix = gps.location.isValid() && gps.location.age() < 5000;
+  char b[40];
+
+  if (navActive()) {
+    // ---- mode navigasi: panah besar + jarak + nama jalan
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 10, navText(nav.kind));
+
+    if (nav.dist >= 1000)
+      snprintf(b, sizeof(b), "%.1f", nav.dist / 1000.0f);
+    else
+      snprintf(b, sizeof(b), "%u", (unsigned)nav.dist);
+
+    oled.setFont(u8g2_font_logisoso24_tn);
+    int w = oled.getStrWidth(b);
+    oled.drawStr(127 - w, 40, b);
+
+    const char* unit = nav.dist >= 1000 ? "km" : "m";
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(127 - w - 2 - oled.getStrWidth(unit), 40, unit);
+
+    drawTurnIcon(22, 42, nav.kind);
+
+    oled.setFont(u8g2_font_5x7_tf);
+    drawTrunc(48, 54, nav.road, 13);
+
+    snprintf(b, sizeof(b), "%s%.0f km/j", fix ? "" : "-",
+             fix ? gps.speed.kmph() : 0.0f);
+    oled.drawStr(48, 63, b);
+    return;
+  }
+
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 9, "GPS");
+  const char* st = fix ? "FIX" : "NO FIX";
+  oled.drawStr(127 - oled.getStrWidth(st), 9, st);
+
+  // kecepatan besar
+  snprintf(b, sizeof(b), "%.0f", fix ? gps.speed.kmph() : 0.0f);
+  oled.setFont(u8g2_font_logisoso26_tn);
+  int w = oled.getStrWidth(b);
+  oled.drawStr(0, 40, b);
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(w + 5, 40, "km/j");
+
+  oled.setFont(u8g2_font_5x7_tf);
+  snprintf(b, sizeof(b), "sat%02d hd%.1f alt%.0fm",
+           gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
+           gps.hdop.isValid() ? gps.hdop.hdop() : 0.0,
+           gps.altitude.isValid() ? gps.altitude.meters() : 0.0);
+  oled.drawStr(0, 50, b);
+
+  snprintf(b, sizeof(b), "%.1fkm", tripKm);
+  oled.drawStr(127 - oled.getStrWidth(b), 50, b);
+
+  if (fix) {
+    snprintf(b, sizeof(b), "lat %9.5f", gps.location.lat());
+    oled.drawStr(0, 57, b);
+    snprintf(b, sizeof(b), "lon %9.5f", gps.location.lng());
+    oled.drawStr(0, 64, b);
+  } else {
+    oled.drawStr(0, 57, "cari satelit... taruh di luar ruangan");
+    oled.drawStr(0, 64, "atau kirim rute dari web");
+  }
+}
+
+static void drawWx() {
+  char b[40];
+
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 9, "CUACA");
+
+  if (!wx.valid) {
+    oled.drawStr(0, 38, "mengambil data...");
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 52, WiFi.status() == WL_CONNECTED ? "coba lagi sebentar"
+                                                     : "wifi belum tersambung");
+    return;
+  }
+
+  oled.setFont(u8g2_font_5x7_tf);
+  snprintf(b, sizeof(b), "%lum lalu", (unsigned long)((millis() - wx.updated) / 60000));
+  oled.drawStr(127 - oled.getStrWidth(b), 9, b);
+
+  // suhu besar
+  snprintf(b, sizeof(b), "%.1f", wx.temp);
+  oled.setFont(u8g2_font_helvB18_tf);
+  int w = oled.getStrWidth(b);
+  oled.drawStr(0, 36, b);
+  oled.drawDisc(w + 5, 20, 2);
+  oled.drawStr(w + 10, 36, "C");
+
+  oled.setFont(u8g2_font_helvB10_tf);
+  oled.drawStr(0, 49, wxText(wx.code));
+
+  oled.setFont(u8g2_font_5x7_tf);
+  snprintf(b, sizeof(b), "terasa %.0fC  RH%d%%  %.0fkm/j",
+           wx.feels, (int)roundf(wx.rh), wx.wind);
+  oled.drawStr(0, 59, b);
+}
+
+static void drawMsg() {
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 9, "PESAN");
+
+  if (inboxCount == 0) {
+    oled.drawStr(16, 34, "belum ada pesan");
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(16, 46, "web: /next /clear");
+    oled.drawStr(16, 55, "notif: /notify");
+    oled.drawStr(16, 63, "atau bot Telegram");
+    return;
+  }
+
+  oled.setFont(u8g2_font_5x7_tf);
+  char b[12];
+  snprintf(b, sizeof(b), "%u/%u", (unsigned)inboxCount, (unsigned)INBOX_MAX);
+  oled.drawStr(127 - oled.getStrWidth(b), 9, b);
+
+  for (int i = 0; i < 2 && (int)noteIndex + i < inboxCount; ++i) {
+    int idx = noteIndex + i;
+    int y = 21 + i * 23;
+    char line[36];
+    snprintf(line, sizeof(line), "[%s] %s", inbox[idx].src, inbox[idx].from);
+    oled.setFont(u8g2_font_6x10_tf);
+    drawTrunc(0, y, line, 19);
+    if (inbox[idx].unread) oled.drawDisc(124, y - 3, 1);
+    oled.setFont(u8g2_font_6x10_tf);
+    drawTrunc(4, y + 11, inbox[idx].text, 20);
+  }
+
+  if (inboxCount > 2) {
+    oled.setFont(u8g2_font_5x7_tf);
+    snprintf(b, sizeof(b), "+%d lagi", inboxCount - 2);
+    oled.drawStr(0, 63, b);
+  }
+}
+
+static void drawSys() {
+  char b[48];
+  int y = 21;
+
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 9, "SISTEM");
+
+  oled.setFont(u8g2_font_5x7_tf);
+
+  snprintf(b, sizeof(b), "ap   %s", WiFi.softAPIP().toString().c_str());
+  oled.drawStr(0, y, b); y += 9;
+
+  snprintf(b, sizeof(b), "ip   %s", WiFi.localIP().toString().c_str());
+  oled.drawStr(0, y, b); y += 9;
+
+  snprintf(b, sizeof(b), "wifi %d dBm   %s",
+           (int)WiFi.RSSI(), WiFi.status() == WL_CONNECTED ? "ok" : "putus");
+  oled.drawStr(0, y, b); y += 9;
+
+  snprintf(b, sizeof(b), "heap %u B   mqtt %s",
+           (unsigned)ESP.getFreeHeap(), mqtt.connected() ? "ok" : "-");
+  oled.drawStr(0, y, b); y += 9;
+
+  uint32_t s = millis() / 1000;
+  snprintf(b, sizeof(b), "up %luh%02lum  gps %lu B",
+           (unsigned long)(s / 3600), (unsigned long)((s % 3600) / 60),
+           (unsigned long)gpsChars);
+  oled.drawStr(0, y, b);
+}
+
+// ---- menu sentuh (tahan lama dari wajah) ----
+static void drawMenuScreen() {
+  oled.setFont(u8g2_font_6x10_tf);
+  for (int i = 0; i < MENU_COUNT; ++i) {
+    int baseline = 10 + i * 9;
+    if (i == menuIndex) {
+      oled.setDrawColor(1);
+      oled.drawBox(0, baseline - 8, 128, 10);
+      oled.setDrawColor(0);
+    } else {
+      oled.setDrawColor(1);
+    }
+    oled.drawStr(6, baseline, MENU_LABEL[i]);
+  }
+  oled.setDrawColor(1);
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(0, 63, "tap=pindah tahan=pilih");
+}
+
+static void drawMoodPicker() {
+  oled.setDrawColor(1);
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(0, 8, "tap pindah, tahan pilih");
+  for (int i = 0; i < (int)Mood::Count; ++i) {
+    int baseline = 20 + i * 9;
+    if (i == moodIndex) {
+      oled.setDrawColor(1);
+      oled.drawBox(0, baseline - 7, 128, 9);
+      oled.setDrawColor(0);
+    } else {
+      oled.setDrawColor(1);
+    }
+    oled.drawStr(6, baseline, MOOD_NAME[i]);
+  }
+  oled.setDrawColor(1);
+}
+
+static void render() {
+  oled.clearBuffer();
+  switch (screen) {
+    case SCR_FACE: drawFace(); break;
+    case SCR_HOME: drawHome(); break;
+    case SCR_GPS:  drawGps();  break;
+    case SCR_WX:   drawWx();   break;
+    case SCR_MSG:  drawMsg();  break;
+    case SCR_SYS:  drawSys();  break;
+    case SCR_MENU: drawMenuScreen(); break;
+    case SCR_MOOD: drawMoodPicker(); break;
+    case SCR_EAT:  drawFace(); break;   // wajah "Nyam"
+    default: break;
+  }
+  uint32_t t0 = micros();
+  oled.sendBuffer();
+  frameMs = (micros() - t0) / 1000;
+}
+
+// ------------------------------------------------------------ tombol
+static const uint32_t LONG_PRESS_MS = 700;
+static bool     btnDown   = false;
+static uint32_t btnAt     = 0;
+static bool     longFired = false;
+
+static void onShortPress() {
+  uint32_t now = millis();
+  lastInput = now;
+  switch (screen) {
+    case SCR_FACE:
+      onFaceTap();                       // elus / kasih makan kalau lapar
+      break;
+    case SCR_MENU:
+      menuIndex = (menuIndex + 1) % MENU_COUNT;
+      break;
+    case SCR_MOOD:
+      moodIndex = (moodIndex + 1) % (int)Mood::Count;
+      break;
+    case SCR_EAT:
+      break;                             // sedang makan, abaikan tap
+    case SCR_MSG:
+      markAllRead();
+      if (inboxCount > 1) noteIndex = (noteIndex + 1) % inboxCount;
+      break;
+    case SCR_WX:
+      forceWeather = true;               // tap = segar cuaca
+      break;
+    default:
+      screen = (Screen)(((int)screen + 1) % (SCR_SYS + 1));
+      if (screen == SCR_MSG) markAllRead();
+      break;
+  }
+  Serial.printf("[ui] tap screen=%s mood=%s\n", SCREEN_NAME[screen], moodName(mood));
+}
+
+static void onLongPress() {
+  uint32_t now = millis();
+  lastInput = now;
+  switch (screen) {
+    case SCR_FACE:
+      openMenu();                        // tahan = buka menu
+      break;
+    case SCR_MENU:
+      onMenuSelect();                    // tahan = pilih item menu
+      break;
+    case SCR_MOOD:
+      setMood((Mood)moodIndex);
+      react = React::None;
+      goFace();
+      break;
+    case SCR_EAT:
+      setMood(Mood::Happy);
+      react = React::Love;
+      reactUntil = now + 1200;
+      goFace();
+      break;
+    case SCR_MSG:
+      clearInbox();
+      beep();
+      Serial.println("[ui] notif dihapus");
+      break;
+    default:
+      forceWeather = true;
+      configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org");
+      beep();
+      Serial.println("[ui] refresh cuaca + jam");
+      break;
+  }
+  Serial.printf("[ui] tahan screen=%s mood=%s\n", SCREEN_NAME[screen], moodName(mood));
+}
+
+static void updateButton() {
+  if (!HAS_BUTTON) return;
+  uint32_t now = millis();
+
+  // Stabilkan sinyal (tombol mekanis maupun TTP223 bisa bergetar sebentar).
+  static bool rawPrev = false;
+  static uint32_t rawAt = 0;
+  bool raw = digitalRead(PIN_BTN) == BTN_ACTIVE;
+  if (raw != rawPrev) {
+    rawPrev = raw;
+    rawAt = now;
+    return;
+  }
+  if ((uint32_t)(now - rawAt) < 25) return;
+  bool down = raw;
+
+  if (down && !btnDown) {
+    btnDown   = true;
+    btnAt     = now;
+    longFired = false;
+  } else if (down && btnDown && !longFired && now - btnAt > LONG_PRESS_MS) {
+    longFired = true;
+    onLongPress();
+  } else if (!down && btnDown) {
+    btnDown = false;
+    if (!longFired && now - btnAt > 30) onShortPress();
+  }
+}
+
+// Serial Monitor jadi pengganti sensor untuk tes: 's' = sentuh pendek, 'l' = tahan.
+static void updateSerialInput() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == 's' || c == 'S') onShortPress();
+    else if (c == 'l' || c == 'L') onLongPress();
+  }
+}
+
+// ------------------------------------------------------------ web server
+static const char PAGE_HTML[] PROGMEM = R"HTML(
+<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>mochi dasai</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#121212;color:#eee;margin:0;padding:20px;max-width:420px}
+h3{margin:20px 0 8px}
+h3:first-child{margin-top:0}
+h3 span{color:#3ddc97;font-weight:400}
+input,select,button{font:inherit;width:100%;box-sizing:border-box;margin:6px 0;padding:10px;
+  border-radius:10px;border:1px solid #333;background:#1c1c1c;color:#eee}
+button{background:#3ddc97;color:#0b0b0b;border:0;font-weight:700}
+button.alt{background:#1c1c1c;color:#eee;border:1px solid #3a3a3a;font-weight:600}
+a{color:#3ddc97}
+</style>
+<h3>layar <span id=now>-</span></h3>
+<button id=next>Layar berikutnya</button>
+<button class=alt id=refresh>Refresh cuaca + jam</button>
+<button class=alt id=clear>Hapus semua notif</button>
+<h3>mochi <span id=moodNow>-</span></h3>
+<button class=alt onclick="fetch('/mood?set=senang').then(upd)">Senang</button>
+<button class=alt onclick="fetch('/mood?set=sedih').then(upd)">Sedih</button>
+<button class=alt onclick="fetch('/mood?set=marah').then(upd)">Marah</button>
+<button class=alt onclick="fetch('/mood?set=ngantuk').then(upd)">Ngantuk</button>
+<button class=alt onclick="fetch('/mood?set=lapar').then(upd)">Lapar</button>
+<button id=feed>Kasih makan</button>
+<h3>kirim notifikasi</h3>
+<form onsubmit="event.preventDefault();
+  fetch('/notify?from='+encodeURIComponent(f.value)+'&text='+encodeURIComponent(t.value))
+  .then(r=>r.json()).then(()=>{t.value='';upd()})">
+  <input id=f value="Tes">
+  <input id=t value="Halo dari browser">
+  <button>Kirim</button>
+</form>
+<h3>rute (layar GPS)</h3>
+<form onsubmit="event.preventDefault();
+  fetch('/nav?kind='+encodeURIComponent(k.value)+'&dist='+encodeURIComponent(d.value)+'&road='+encodeURIComponent(r.value))
+  .then(()=>upd())">
+  <select id=k>
+    <option value=left>belok kiri</option>
+    <option value=right>belok kanan</option>
+    <option value=straight>lurus terus</option>
+    <option value=slightleft>agak ke kiri</option>
+    <option value=slightright>agak ke kanan</option>
+    <option value=uturn>putar balik</option>
+    <option value=roundabout>bundaran</option>
+  </select>
+  <input id=d type=number inputmode=numeric value=200 placeholder="jarak (meter)">
+  <input id=r value="Jl. Sudirman" placeholder="nama jalan">
+  <button>Kirim rute</button>
+</form>
+<p><a href="/api/status">/api/status</a></p>
+<script>
+const $=id=>document.getElementById(id);
+function upd(){fetch('/api/status').then(r=>r.json()).then(s=>{$('now').textContent='- '+s.screen;$('moodNow').textContent='- '+s.mood})}
+$('next').onclick=()=>fetch('/next').then(upd);
+$('refresh').onclick=()=>fetch('/refresh');
+$('clear').onclick=()=>fetch('/clear').then(upd);
+$('feed').onclick=()=>fetch('/feed').then(upd);
+function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
+syncClock(); setInterval(syncClock, 60000);
+upd();
+</script>
+)HTML";
+
+static void setupWeb() {
+  web.on("/", HTTP_GET, []() { web.send_P(200, "text/html", PAGE_HTML); });
+
+  // HP (iOS/Android) suka membuka halaman "login WiFi" sendiri. Semua
+  // permintaan asing kita arahkan ke halaman kontrol supaya popup muncul.
+  web.onNotFound([]() {
+    web.sendHeader("Location", "http://192.168.4.1/", true);
+    web.send(302, "text/plain", "");
+  });
+
+  // jam dikirim dari browser HP: /time?epoch=1700000000
+  // berguna saat ESP32 tidak punya internet (mode hotspot saja)
+  web.on("/time", HTTP_GET, []() {
+    if (web.hasArg("epoch")) {
+      unsigned long long e = strtoull(web.arg("epoch").c_str(), nullptr, 10);
+      if (e > 1700000000ULL) {
+        struct timeval tv;
+        tv.tv_sec  = (time_t)e;
+        tv.tv_usec = 0;
+        settimeofday(&tv, nullptr);
+        Serial.printf("[jam] diset dari browser: %llu\n", e);
+      }
+    }
+    web.send(200, "text/plain", "ok");
+  });
+
+  // notifikasi lewat GET: /notify?from=..&text=..
+  web.on("/notify", HTTP_GET, []() {
+    String from = web.arg("from");
+    String text = web.arg("text");
+    if (text.length() == 0) {
+      web.send(400, "application/json", "{\"ok\":false,\"err\":\"text kosong\"}");
+      return;
+    }
+    addNotification("WA", from.c_str(), text.c_str());
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // notifikasi lewat POST: json {"from":"..","text":".."} atau form biasa
+  web.on("/notify", HTTP_POST, []() {
+    String from, text;
+    if (web.hasArg("plain")) {
+      String body = web.arg("plain");
+      JsonDocument doc;
+      if (body.length() && body[0] == '{' && !deserializeJson(doc, body)) {
+        from = String((const char*)(doc["from"] | "WhatsApp"));
+        text = String((const char*)(doc["text"] | ""));
+      }
+    }
+    if (text.length() == 0) {
+      from = web.arg("from");
+      text = web.arg("text");
+    }
+    if (text.length() == 0) {
+      web.send(400, "application/json", "{\"ok\":false,\"err\":\"text kosong\"}");
+      return;
+    }
+    addNotification("WA", from.c_str(), text.c_str());
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // ---- kontrol dari HP (pengganti tombol fisik) ----
+  web.on("/next", HTTP_GET, []() {
+    screen = (Screen)(((int)screen + 1) % (SCR_SYS + 1));
+    Serial.printf("[web] layar -> %s\n", SCREEN_NAME[screen]);
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // ---- navigasi belokan: /nav?kind=left&dist=200&road=Jl.%20Sudirman
+  web.on("/nav", HTTP_GET, []() {
+    String k = web.arg("kind");
+    k.toLowerCase();
+
+    uint8_t kind = NAV_STRAIGHT;
+    if      (k == "left"        || k == "kiri")        kind = NAV_LEFT;
+    else if (k == "right"       || k == "kanan")       kind = NAV_RIGHT;
+    else if (k == "slightleft"  || k == "agakkiri")    kind = NAV_SLIGHT_LEFT;
+    else if (k == "slightright" || k == "agakkanan")   kind = NAV_SLIGHT_RIGHT;
+    else if (k == "uturn"       || k == "putarbalik")  kind = NAV_UTURN;
+    else if (k == "roundabout"  || k == "bundaran")    kind = NAV_ROUNDABOUT;
+
+    long d = web.hasArg("dist") ? web.arg("dist").toInt() : 200;
+    if (d < 0) d = 0;
+    if (d > 60000) d = 60000;
+
+    nav.kind  = kind;
+    nav.dist  = (uint16_t)d;
+    nav.at    = millis();
+    nav.valid = true;
+    sanitize(nav.road, sizeof(nav.road),
+             web.hasArg("road") ? web.arg("road").c_str() : "");
+
+    screen = SCR_GPS;                     // langsung tampilkan di OLED
+    Serial.printf("[nav] %s %um %s\n", navText(kind), (unsigned)nav.dist, nav.road);
+
+    char out[80];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"kind\":\"%s\",\"dist\":%u}",
+             navText(kind), (unsigned)nav.dist);
+    web.send(200, "application/json", out);
+  });
+
+  // diagnosa wajah: /face?frame=45 -> diam di 1 frame; /face?auto=1 -> animasi lagi
+  web.on("/face", HTTP_GET, []() {
+    if (web.hasArg("auto")) {
+      faceFrozen = -1;
+    } else if (web.hasArg("frame")) {
+      int n = web.arg("frame").toInt();
+      if (n < 0) n = 0;
+      if (n >= DASAI_FRAME_COUNT) n = DASAI_FRAME_COUNT - 1;
+      faceFrozen = n;
+      screen = SCR_FACE;
+    }
+    Serial.printf("[web] face frame=%d\n", (int)faceFrozen);
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // kontrol mood / kasih makan dari web: /mood?set=marah , /feed
+  web.on("/mood", HTTP_GET, []() {
+    String s = web.arg("set");
+    s.toLowerCase();
+    Mood m = mood;
+    if      (s == "senang" || s == "happy")            m = Mood::Happy;
+    else if (s == "sedih"  || s == "sad")              m = Mood::Sad;
+    else if (s == "marah"  || s == "angry")            m = Mood::Angry;
+    else if (s == "ngantuk"|| s == "sleepy")           m = Mood::Sleepy;
+    else if (s == "lapar"  || s == "hungry")           m = Mood::Hungry;
+    setMood(m);
+    react = React::None;
+    screen = SCR_FACE;
+    char out[64];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"mood\":\"%s\"}", moodName(mood));
+    web.send(200, "application/json", out);
+  });
+
+  web.on("/feed", HTTP_GET, []() {
+    screen = SCR_EAT;
+    screenSince = millis();
+    markFed();
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  web.on("/clear", HTTP_GET, []() {
+    clearInbox();
+    Serial.println("[web] notif dihapus");
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  web.on("/refresh", HTTP_GET, []() {
+    forceWeather = true;
+    configTime(0, 0, "pool.ntp.org", "id.pool.ntp.org");
+    Serial.println("[web] refresh cuaca + jam");
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  web.on("/api/status", HTTP_GET, []() {
+    JsonDocument doc;
+    doc["uptime_s"] = millis() / 1000;
+    doc["ap"]       = WiFi.softAPIP().toString();
+    doc["ip"]       = WiFi.localIP().toString();
+    doc["rssi"]     = WiFi.RSSI();
+    doc["heap"]     = ESP.getFreeHeap();
+    doc["screen"]   = SCREEN_NAME[screen];
+    doc["mood"]     = moodName(mood);
+    doc["last_fed"] = lastFed;
+    doc["unread"]   = unreadCount;
+    doc["messages"] = inboxCount;
+    doc["nav"]      = navActive() ? navText(nav.kind) : "";
+    doc["nav_dist"] = navActive() ? nav.dist : 0;
+
+    JsonObject g = doc["gps"].to<JsonObject>();
+    bool fix = gps.location.isValid() && gps.location.age() < 5000;
+    g["fix"]  = fix;
+    g["sats"] = gps.satellites.isValid() ? gps.satellites.value() : 0;
+    if (fix) {
+      g["lat"] = gps.location.lat();
+      g["lon"] = gps.location.lng();
+    }
+    g["trip_km"] = tripKm;
+
+    JsonObject w = doc["weather"].to<JsonObject>();
+    w["valid"] = wx.valid;
+    if (wx.valid) {
+      w["temp"] = wx.temp;
+      w["rh"]   = wx.rh;
+      w["code"] = wx.code;
+      w["text"] = wxText(wx.code);
+    }
+
+    String out;
+    serializeJson(doc, out);
+    web.send(200, "application/json", out);
+  });
+
+  web.onNotFound([]() { web.send(404, "text/plain", "404"); });
+  web.begin();
+}
+
+// ------------------------------------------------------------ setup / loop
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.println("=== mochi dasai ===");
+
+  // mood & waktu makan diambil dari NVS supaya tetap ingat setelah reboot
+  nvsBegin();
+  uint32_t storedMood = nvsGet("mood", 0);
+  if (storedMood >= (uint32_t)Mood::Count) storedMood = 0;
+  mood = (Mood)storedMood;
+  lastFed = nvsGet("fed", 0);
+  faceHintUntil = millis() + 8000;
+  lastInput = millis();
+  Serial.printf("[mood] boot: %s (lastFed=%lu)\n",
+                moodName(mood), (unsigned long)lastFed);
+
+  if (HAS_BUTTON) {
+    // Tombol ke GND aktif LOW; TTP223 aktif HIGH.
+    pinMode(PIN_BTN, BTN_ACTIVE == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
+  }
+  if (HAS_BUZZER) {
+    pinMode(PIN_BUZZ, OUTPUT);
+    digitalWrite(PIN_BUZZ, LOW);
+  }
+
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setClock(400000);
+  oled.setI2CAddress(OLED_ADDR << 1);
+  oled.begin();
+  oled.setBusClock(400000);
+  oled.setContrast(180);
+
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 22, "mochi dasai");
+  oled.drawStr(0, 36, "booting...");
+  oled.sendBuffer();
+
+  // splash: mata mochi membuka
+  for (int i = 0; i <= 8; ++i) {
+    int h = 3 + i * 2;
+    int r = (15 < h ? 15 : h) / 2;
+    oled.clearBuffer();
+    oled.drawRBox(40, 33 - h / 2, 15, h, r);
+    oled.drawRBox(74, 33 - h / 2, 15, h, r);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(52, 58, "mochi dasai");
+    oled.sendBuffer();
+    delay(45);
+  }
+
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+
+  // ---- hotspot sendiri (selalu nyala, HP bisa langsung connect)
+  // Catatan: dulu di sini ada WiFi.scanNetworks() untuk diagnosa. Scan bikin
+  // radio pindah mode STA<->AP dan sering mengganggu AP, jadi dihapus.
+  WiFi.persistent(false);              // jangan tulis kredensial ke NVS
+  WiFi.mode(AP_ONLY ? WIFI_AP : WIFI_AP_STA);
+  WiFi.setHostname(DEVICE_ID);
+
+  // Turunkan daya pancar SEBELUM AP start. Di board Super Mini, 19 dBm bikin
+  // arus puncak WiFi tinggi -> catu USB drop -> hotspot hilang sendiri.
+  esp_err_t e1 = esp_wifi_set_max_tx_power((int8_t)WIFI_POWER_8_5dBm);
+  Serial.printf("[ap] set tx (sebelum AP) = 0x%x %s\n", (int)e1, esp_err_to_name(e1));
+
+  if (strlen(AP_PASS) >= 8) apOk = WiFi.softAP(AP_SSID, AP_PASS, 6, false, 4);
+  else                      apOk = WiFi.softAP(AP_SSID);
+
+  // Set ulang setelah AP start (driver bisa menimpa saat start).
+  esp_err_t e2 = esp_wifi_set_max_tx_power((int8_t)WIFI_POWER_8_5dBm);
+  esp_wifi_set_ps(WIFI_PS_NONE);       // jangan sleep, beacon tetap teratur
+  int8_t txNow = 0;
+  esp_err_t e3 = esp_wifi_get_max_tx_power(&txNow);
+  Serial.printf("[ap] set tx (sesudah AP) = 0x%x, get = 0x%x -> %d dBm\n",
+                (int)e2, (int)e3, (int)(txNow / 4));
+
+  Serial.printf("[ap] softAP=%d  \"%s\"  ch%d  ip=%s\n",
+                (int)apOk, AP_SSID, WiFi.channel(),
+                WiFi.softAPIP().toString().c_str());
+  if (!apOk) Serial.println("[ap] GAGAL bikin hotspot!");
+
+  // ukur kecepatan kirim 1 frame penuh ke OLED (penting buat fps)
+  {
+    uint32_t t0 = micros();
+    for (int i = 0; i < 8; ++i) {
+      oled.clearBuffer();
+      oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
+                    dasaiFrame((uint8_t)(FACE_LOOP_FIRST + i)));
+      oled.sendBuffer();
+    }
+    Serial.printf("[oled] 1 frame 128x64 = %lu ms -> maksimal %lu fps\n",
+                  (unsigned long)((micros() - t0) / 8000),
+                  (unsigned long)(8000000UL / ((micros() - t0) / 8 + 1)));
+  }
+
+  if (!AP_ONLY) {
+    WiFi.setAutoReconnect(true);
+    WiFi.onEvent(onWifiEvent);
+  }
+
+  // zona waktu dipakai juga saat jam dikirim dari browser (tanpa internet)
+  setenv("TZ", TZ_STRING, 1);
+  tzset();
+
+  mqtt.setBufferSize(512);
+  mqtt.setCallback(onMqttMessage);
+  if (mqttEnabled()) mqtt.setServer(MQTT_HOST, MQTT_PORT);
+
+  setupWeb();
+}
+
+void loop() {
+  static uint32_t lastRender = 0;
+  static bool     ipLogged   = false;
+
+  pumpGps();
+  updateButton();
+  updateSerialInput();
+  wifiTask();
+  mqttTask();
+  telegramTask();
+  timeTask();
+  updateHunger();
+  weatherTask();
+  web.handleClient();
+
+  static bool radioReady = false;
+  if (!radioReady) {
+    radioReady = true;
+    WiFi.setSleep(false);                // hotspot lebih responsif
+    if (MDNS.begin(DEVICE_ID)) {
+      MDNS.addService("http", "tcp", 80);
+      Serial.printf("[mdns] http://%s.local/\n", DEVICE_ID);
+    } else {
+      Serial.println("[mdns] tidak aktif (pakai IP saja)");
+    }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!ipLogged) {
+      ipLogged = true;
+      Serial.printf("[wifi] tersambung  http://%s/\n",
+                    WiFi.localIP().toString().c_str());
+    }
+  }
+
+  // laporan kesehatan tiap 5 detik -> kelihatan di Serial Monitor
+  {
+    static uint32_t lastStat = 0;
+    if (millis() - lastStat > 5000) {
+      lastStat = millis();
+      Serial.printf("[stat] ap=%d ch%d klien=%d heap=%u frame=%lums layar=%s\n",
+                    (int)apOk, WiFi.channel(), WiFi.softAPgetStationNum(),
+                    (unsigned)ESP.getFreeHeap(), (unsigned long)frameMs,
+                    SCREEN_NAME[screen]);
+    }
+  }
+
+  // jaga-jaga: kalau hotspot mati sendiri, hidupkan ulang
+  {
+    static uint32_t lastApCheck = 0;
+    if (millis() - lastApCheck > 20000) {
+      lastApCheck = millis();
+      if (WiFi.channel() == 0 || !apOk) {
+        Serial.println("[ap] hotspot mati, hidupkan ulang...");
+        WiFi.mode(AP_ONLY ? WIFI_AP : WIFI_AP_STA);
+        apOk = (strlen(AP_PASS) >= 8)
+                 ? WiFi.softAP(AP_SSID, AP_PASS, 6, false, 4)
+                 : WiFi.softAP(AP_SSID);
+        esp_wifi_set_max_tx_power((int8_t)WIFI_POWER_8_5dBm);
+        esp_wifi_set_ps(WIFI_PS_NONE);
+        Serial.printf("[ap] ulang softAP=%d ch%d\n", (int)apOk, WiFi.channel());
+      }
+    }
+  }
+
+  // auto-rotate hanya untuk 6 layar utama, tidak mengganggu menu/mood/makan
+  if (AUTO_ROTATE_MS > 0 &&
+      screen < SCR_MENU && !(navActive() && screen == SCR_GPS)) {
+    static uint32_t lastRotate = 0;
+    uint32_t hold = (screen == SCR_FACE) ? (uint32_t)AUTO_ROTATE_MS * 2
+                                         : (uint32_t)AUTO_ROTATE_MS;
+    if (millis() - lastRotate >= hold) {
+      lastRotate = millis();
+      screen = (Screen)(((int)screen + 1) % (SCR_SYS + 1));
+    }
+  }
+
+  // menu / pilih mood ditutup otomatis setelah 12 detik tanpa input
+  if ((screen == SCR_MENU || screen == SCR_MOOD) &&
+      millis() - lastInput > 12000) {
+    goFace();
+  }
+
+  // selesai makan otomatis jadi senang lagi
+  if (screen == SCR_EAT && millis() - screenSince > 4200) {
+    setMood(Mood::Happy);
+    react = React::Love;
+    reactUntil = millis() + 1200;
+    goFace();
+  }
+
+  uint32_t interval = (screen == SCR_FACE || screen == SCR_EAT)
+                        ? (uint32_t)FACE_FRAME_MS : 100;
+  if (millis() - lastRender >= interval) {
+    lastRender = millis();
+    render();
+  }
+
+  delay(1);
+}
+
+
+

@@ -1,0 +1,380 @@
+# mochi dasai
+
+Gadget meja kecil: **mochi dasai interaktif** di ESP32-C3 Super Mini dengan OLED
+0.96" (SSD1306 128x64, I2C). Bisa elus, marah, sedih, ngantuk, lapar, kasih
+makan, plus jam, cuaca, GPS, dan notifikasi WhatsApp & Telegram.
+
+```
++----------------------------+
+| Min 15 Nov          MSG 2  |
+|                            |
+| 14:05        27 C          |
+|              Cerah berawan |
+|                            |
+| wifi sat08 mq       MSG2   |
++----------------------------+
+```
+
+Sensor sentuh **TTP223** dipasang di GPIO3:
+- **Sentuh pendek** di wajah = elus. Mocha senang memberi hati; kalau marah,
+  elus 3 kali membuatnya sedih; sedih/ngantuk langsung senang; kalau lapar,
+  sekali sentuh langsung diberi makan.
+- **Tahan ±0,7 detik** di wajah = menu: Jam, Cuaca, Notif, Ubah mood,
+  Kasih makan, Tutup. Di menu, sentuh = pindah item, tahan = pilih.
+- Mood dan waktu terakhir makan **tersimpan di NVS**, tetap ingat setelah reboot.
+  Setelah 1 jam tidak diberi makan, mochi jadi lapar (diatur `HUNGER_SEC`).
+
+Semua kontrol juga bisa dari HP lewat halaman web — lihat bagian 4. Untuk tes
+tanpa sensor, buka Serial Monitor dan ketik `s` (= sentuh pendek) atau `l`
+(= tahan); reaksi mood/menu sama persis seperti sensor sentuh.
+
+Layar utama: Wajah mochi -> Jam+cuaca -> GPS -> Cuaca -> Pesan (WA/TG) -> Sistem.
+Layar tambahan: Menu, Ubah mood, dan Makan (muncul lewat sentuhan).
+
+---
+
+## 1. Yang perlu disiapkan
+
+| Bagian | Keterangan |
+|---|---|
+| ESP32-C3 Super Mini | 4 MB flash, tanpa PSRAM. Cukup. |
+| OLED 0.96" SSD1306 | 128x64, I2C, alamat 0x3C |
+| GPS module | NEO-6M / ATGM336H / u-blox MAX-M10S (UART) |
+| Sensor sentuh | TTP223 (OUT aktif HIGH) ke GPIO3 — layar tetap bisa dikontrol dari web |
+| Buzzer | buzzer aktif 3.3V — **opsional**, tanpa ini notif tetap tampil |
+| Kabel | 8-10 jumper female-female |
+
+Catatan:
+- Kode ini untuk OLED **128x64**. Kalau kamu punya yang 0.42" (72x40), bilang saja,
+  layout-nya harus diubah.
+- GPS butuh pandangan langit. Di dalam ruangan biasanya **tidak dapat fix**.
+
+---
+
+## 2. Wiring
+
+| Modul | Pin modul | ESP32-C3 Super Mini |
+|---|---|---|
+| OLED | VDD / VCC | 3V3 |
+| OLED | GND | GND |
+| OLED | SDA | GPIO20 |
+| OLED | SCK / SCL | GPIO21 |
+| GPS | VCC | 5V (modul NEO-6M punya regulator) atau 3V3 |
+| GPS | GND | GND |
+| GPS | TX | GPIO4 (RX ESP32) |
+| GPS | RX | GPIO5 (TX ESP32, opsional) |
+| TTP223 | OUT | GPIO3 |
+| TTP223 | VCC | 3V3 |
+| TTP223 | GND | GND |
+| Buzzer | + | GPIO10 |
+| Buzzer | - | GND |
+
+Kalau pin bentrok dengan kebutuhanmu, ubah di `include/config.h`.
+Di ESP32-C3 pin I2C/UART bebas dipilih, jadi susunan ini cuma kesepakatan:
+OLED di GPIO20/21, GPS di GPIO4/5.
+
+> GPS NEO-6M menarik ~50 mA saat mencari satelit. Dari USB aman.
+> Kalau pakai baterai LiPo 3.7V, jangan langsung ke pin 5V/3V3 — pakai boost/regulator.
+
+---
+
+## 3. Build & upload
+
+Pilih salah satu: **Arduino IDE 2** (paling gampang kalau belum pernah pakai PlatformIO)
+atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
+
+### A. Arduino IDE 2
+
+**Sekali saja (setup):**
+
+1. Install **Arduino IDE 2**.
+2. `File > Preferences` -> **Additional boards manager URLs**, tempel:
+   ```
+   https://espressif.github.io/arduino-esp32/package_esp32_index.json
+   ```
+3. Buka **Boards Manager** (ikon board di sidebar kiri), cari `esp32`,
+   install **esp32 by Espressif Systems** (versi 3.x). Tunggu selesai.
+4. Buka **Library Manager** (ikon buku), install satu per satu:
+   - `U8g2` (olikraus)
+   - `TinyGPSPlus` (Mikal Hart)
+   - `ArduinoJson` (Benoit Blanchon) — **harus v7**, kalau dapatnya v6 kode error
+   - `PubSubClient` (Nick O'Leary)
+5. Set di menu **Tools**:
+   - Board: **ESP32C3 Dev Module**
+   - Port: COMx yang muncul setelah board dicolok
+   - **USB CDC On Boot: Enabled** (wajib, kalau tidak Serial kosong)
+   - Flash Mode: **DIO**
+   - Flash Size: **4 MB**
+   - Partition Scheme: **Huge APP (3MB No OTA/1MB SPIFFS)**
+   - Upload Speed: **921600** (kalau gagal, turunkan ke 115200)
+
+**Tiap kali mau upload:**
+
+1. Buka sketch: `File > Open` -> `C:\mochi-dasai\arduino\mochi_dasai\mochi_dasai.ino`
+2. Edit `C:\mochi-dasai\include\config.h` (buka pakai Notepad / VS Code):
+   - `AP_SSID`, `AP_PASS` (hotspot dari ESP32)
+   - `WIFI_SSID`, `WIFI_PASS` (router, opsional), `TZ_STRING`, `TELEGRAM_TOKEN`
+3. Klik **Upload** (ikon →).
+4. Kalau muncul `Failed to connect` / port hilang: tahan **BOOT**, tekan **RST**,
+   lepas BOOT, lalu Upload lagi.
+
+> File `.ino` itu cuma pintu masuk; isi aslinya di `src/main.cpp`.
+> Jangan pindahkan `config.h` — path-nya sudah diatur.
+
+### B. PlatformIO (VS Code)
+
+1. Install VS Code + extension **PlatformIO IDE**.
+2. `File > Open Folder` -> `C:\mochi-dasai`.
+3. Edit `include/config.h`.
+4. Klik **Upload** di status bar bawah.
+5. Buka Serial Monitor 115200. IP akan muncul di situ dan di layar **SISTEM**.
+
+---
+
+## 4. Cara pakai
+
+- Layar pertama = **wajah mochi**: animasi **asli DASAI**, 90 frame bitmap
+  128x64 yang diputar 25 fps (frame-nya di `include/dasai_frames.h`).
+- **ESP32 membuat hotspot sendiri** — tidak perlu router:
+
+  | | |
+  |---|---|
+  | Nama WiFi | `mochi-dasai` |
+  | Password | `mochi1234` |
+  | Alamat web | `http://192.168.4.1` |
+
+  Di HP: **Setelan → WiFi → mochi-dasai** → buka browser → `192.168.4.1`.
+  (iPhone akan bilang "Tidak ada internet" — pilih **Tetap Sambung**, itu normal.)
+- Jam otomatis ikut **jam HP** begitu halaman web dibuka (dikirim lewat
+  `/time?epoch=...`), jadi tetap akurat walau tanpa internet.
+
+  > Tanpa internet, cuaca & Telegram tidak jalan. `AP_ONLY` sudah `0`, jadi ESP32
+  > jadi hotspot **dan** ikut WiFi rumah sekaligus. Isi `WIFI_SSID`/`WIFI_PASS`
+  > di `include/config.h` dengan WiFi 2.4 GHz yang dipakai PC bridge.
+- `http://192.168.4.1/api/status` -> JSON status (layar aktif, gps, cuaca, heap, dll).
+- Bisa juga `http://mochi-01.local/` kalau mDNS jalan di jaringanmu.
+
+### Kontrol sensor sentuh & konfigurasi
+
+Sensor TTP223 sudah diaktifkan di `include/config.h`:
+
+| Define | Nilai | Arti |
+|---|---|---|
+| `HAS_BUTTON` | `1` | sensor/button aktif di GPIO3 |
+| `BTN_ACTIVE` | `HIGH` | TTP223 aktif HIGH (tombol ke GND → ubah ke `LOW`) |
+| `HAS_BUZZER` | `0` | `1` = buzzer dipasang di GPIO10 |
+| `AUTO_ROTATE_MS` | `0` | `0` = mati (disarankan supaya tidak bertabrakan dengan menu) |
+| `HUNGER_SEC` | `3600` | detik sampai mochi lapar setelah terakhir makan |
+| `AP_ONLY` | `0` | hotspot + STA, supaya bridge WA di PC bisa mengirim notif lewat IP LAN |
+
+Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
+
+| Endpoint | Fungsi |
+|---|---|
+| `/next` | pindah ke layar berikutnya |
+| `/refresh` | ambil ulang cuaca + sinkron jam (NTP) |
+| `/clear` | hapus semua notifikasi di inbox |
+| `/notify?from=..&text=..` | kirim notifikasi |
+| `/nav?kind=left&dist=200&road=..` | kirim perintah belokan ke layar GPS |
+| `/face?frame=45` | diagnosa: diamkan animasi DASAI di satu frame |
+| `/face?auto=1` | lanjutkan animasi wajah normal |
+| `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`) |
+| `/feed` | kasih makan (langsung tampil animasi "Nyam") |
+
+Cukup buka `http://192.168.4.1/` di Safari/Chrome HP, tombolnya sudah ada di sana
+(termasuk tombol mood dan Kasih makan). Notifikasi baru tetap langsung muncul di
+layar Pesan + badge `MSG n`.
+
+Tes cepat dari terminal:
+
+```bash
+curl "http://192.168.1.8/notify?from=Budi&text=Halo%20dari%20curl"
+curl -X POST -H "Content-Type: application/json" ^
+     -d "{\"from\":\"Budi\",\"text\":\"tes json\"}" http://192.168.1.8/notify
+```
+
+(`^` itu line continuation di Windows CMD; di PowerShell pakai backtick.)
+
+---
+
+## 5. Notifikasi WhatsApp
+
+ESP32 **tidak bisa** membaca WhatsApp sendiri. Harus ada yang meneruskan.
+Pilih satu sesuai perangkatmu.
+
+### Opsi A — iPhone: Shortcut "Kirim ke Mochi" (manual, aman)
+
+iOS tidak mengizinkan aplikasi lain membaca notifikasi WhatsApp, jadi ini
+berbasis **share sheet**: kamu teruskan pesan yang mau ditampilkan.
+
+1. Buka app **Shortcuts** -> tab **Shortcuts** -> **+**.
+2. Tambah action **Get Contents of URL**:
+   - URL: `http://192.168.1.8/notify`
+   - Tap **Show More** -> Method: **POST**
+   - Request Body: **JSON**, tambah dua field:
+     - `text` (Text) = **Shortcut Input**
+     - `from` (Text) = `WhatsApp`
+3. Tap ikon **ⓘ** di shortcut -> nyalakan **Show in Share Sheet**,
+   Share Sheet Types: **Text**. (Tanpa ini shortcut tidak muncul di menu Share.)
+4. Beri nama shortcut: **Kirim ke Mochi**.
+5. Di WhatsApp, tekan lama pesan -> **Share** -> pilih **Kirim ke Mochi**.
+
+Catatan:
+- iPhone dan ESP32 harus di WiFi yang sama.
+- Kalau IP ESP32 berubah-ubah, pakai `http://mochi-01.local/notify` atau
+  pasang IP statis di router.
+- Untuk notifikasi Telegram tidak perlu ini — bot langsung masuk otomatis
+  (bagian 6).
+
+### Opsi B — MacroDroid di Android (otomatis, tanpa risiko ban)
+
+1. Install **MacroDroid**, buat macro baru.
+2. Trigger: **Notification Received** -> app **WhatsApp**.
+3. Action: **HTTP Request**
+   - Method: `GET`
+   - URL: `http://192.168.1.8/notify?from=[notification_title]&text=[notification_text]`
+4. Simpan. Setiap notifikasi WhatsApp masuk -> muncul di mochi.
+
+Tidak butuh PC menyala, tidak melanggar ToS.
+
+### Opsi C — Bridge Node.js (`bridge/`)
+
+Pakai `whatsapp-web.js` (tidak resmi, **nomor bisa kena ban** — pakai nomor cadangan).
+
+```bash
+cd bridge
+set PUPPETEER_SKIP_DOWNLOAD=1 && npm install   # Windows CMD
+# PowerShell: $env:PUPPETEER_SKIP_DOWNLOAD=1; npm install
+npm start
+```
+
+`bridge.js` memakai Chrome yang sudah terpasang di
+`C:\Program Files\Google\Chrome\Application\chrome.exe` (Lewati unduhan Chromium
+Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
+
+`bridge.js` sudah berisi `ESP_IP = 192.168.1.8` (IP LAN ESP32 yang sedang
+dipakai). Kalau IP berubah karena DHCP, timpa tanpa mengedit file:
+
+```bash
+set ESP_IP=192.168.1.99 && npm start   # Windows CMD
+$env:ESP_IP="192.168.1.99"; npm start  # PowerShell
+```
+
+Scan QR yang muncul di terminal (WhatsApp > Perangkat tertaut). Kalau karakter
+QR berantakan di terminal Windows, buka file `bridge/qr.txt` dan scan isinya
+dengan aplikasi QR scanner. Setelah itu setiap pesan masuk otomatis diteruskan
+ke `http://192.168.1.8/notify`. Sesi login disimpan di folder `bridge/session`,
+jadi tidak perlu scan QR tiap kali.
+
+> **Bridge nyangkut / timeout di `Client.inject`?**
+> Profil sesi lama bisa bikin WhatsApp Web redirect ke halaman `/login/` yang
+> tidak dikenali library. Hapus folder `bridge/session` lalu jalankan ulang
+> `npm start` (QR baru akan muncul). Ini aman kalau belum pernah berhasil login.
+
+### Opsi D — MQTT (kalau sudah punya broker)
+
+Set `MQTT_HOST` di `config.h`. ESP32 subscribe ke:
+
+```
+mochi/<DEVICE_ID>/notify
+```
+
+Payload boleh JSON `{"from":"Budi","text":"halo"}` atau teks biasa.
+Cocok kalau nanti mau disambung ke WhatsApp Cloud API (resmi) lewat webhook.
+
+---
+
+## 6. Telegram (paling gampang, resmi)
+
+Tidak butuh PC menyala dan tidak butuh bridge — ESP32 langsung tanya
+Telegram Bot API.
+
+1. Chat **@BotFather** di Telegram -> `/newbot` -> ikuti langkahnya.
+2. Salin token ke `include/config.h`:
+
+   ```c
+   #define TELEGRAM_TOKEN "123456789:AAH..."
+   ```
+
+3. Upload ulang. Buka Telegram, cari bot kamu, tekan **Start**, lalu kirim pesan.
+   Pesan akan muncul di layar **PESAN** dengan tag `[TG]`, plus bunyi buzzer
+   (kalau buzzer dipasang).
+
+Catatan:
+- Bot hanya menerima chat pribadi yang mengirim pesan ke dia. Untuk grup,
+  tambahkan bot ke grup (matikan privacy mode lewat `/setprivacy` di BotFather
+  kalau ingin bot membaca semua pesan grup).
+- Saat boot, tumpukan update lama (maksimal 24 jam dari Telegram) dibuang,
+  jadi inbox mulai bersih. Pesan yang datang setelah itu yang ditampilkan.
+- ESP32 tanya server tiap 4 detik (`getUpdates`, koneksi TLS dipakai ulang),
+  jadi tidak ada port forwarding / webhook yang perlu disetel.
+- Pesan lebih dari ~70 karakter dipotong di layar.
+
+---
+
+## 7. Kalau ada masalah
+
+| Gejala | Cek |
+|---|---|
+| OLED blank | alamat I2C (0x3C/0x3D), SDA/SCL tertukar, pin di `config.h` |
+| OLED bergeser/noise | layar pakai driver SH1106 -> set `OLED_SH1106 1` |
+| OLED garis-garis acak | cek `/face?frame=45`: kalau tetap rusak, masalah kabel/I2C (turunkan `Wire.setClock` ke `100000`) |
+| Hotspot muncul sebentar lalu hilang | daya USB kurang: pakai kabel pendek/adaptor 5V 1A; firmware sudah memakai TX 8.5 dBm + watchdog AP |
+| Board tidak terdeteksi | kabel USB data (bukan charge-only), tahan BOOT saat upload |
+| GPS `NO FIX` | antena menghadap langit, di luar ruangan, TX GPS -> GPIO4, baud 9600 |
+| GPS dapat data tapi koordinat 0 | tunggu 1-3 menit pertama (cold start) |
+| Jam `--:--` | buka `http://192.168.4.1` di HP sekali (jam dikirim dari browser) |
+| Cuaca kosong | butuh internet; set `AP_ONLY 0` + isi WiFi router |
+| Telegram tidak masuk | token salah/kedaluwarsa, bot belum di-`/start`, cek Serial `[tg]` |
+| ESP restart sendiri | catu daya lemah atau brownout; pakai kabel USB pendek |
+| Layar patah-patah | normal; refresh 10 fps, fetching cuaca sesekali memblokir ~1-2 s |
+| Hotspot muncul lalu hilang | kabel USB/catu daya lemah; firmware membatasi tx 8,5 dBm dan menyalakan ulang AP otomatis. Cek log `[ap]` di Serial Monitor |
+| Wajah jadi garis-garis | buka `http://192.168.4.1/face?frame=45` — kalau tetap garis, cek kabel SDA/SCL; kalau normal, masalahnya di transisi frame |
+
+---
+
+## 8. Batasan & ide lanjutan
+
+- C3 single core, tanpa PSRAM: animasi wajah 25 fps, layar lain 10 fps supaya bus I2C tidak penuh.
+- Cuaca: Open-Meteo (gratis, tanpa API key), update tiap 10 menit.
+- GPS: kecepatan, satelit, HDOP, altitude, jarak tempuh (trip).
+- Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
+  tombol fisik supaya tidak perlu buka HP untuk pindah layar.
+
+### Animasi wajah (frame asli DASAI)
+
+Wajahnya bukan gambar ulang — ini **90 frame bitmap 128x64 dari animasi RIVE
+resmi** DASAI (diekspor oleh [upir](https://github.com/upiir/esp32s3_oled_dasai_mochi),
+format image2cpp), disimpan di `include/dasai_frames.h` sebagai PROGMEM
+(92 KB, aman untuk partisi Huge APP).
+
+Frame 0-12 itu fade in dan 59-89 fade out, jadi firmware hanya memutar frame
+13 sampai 58, bolak-balik (ping-pong) supaya sambungan loop tidak kelihatan dan
+wajah tidak pernah hilang jadi layar hitam.
+
+| Mau ubah | Di mana |
+|---|---|
+| kecepatan animasi | `FACE_FRAME_MS` di `include/config.h` — 40 = 25 fps, 33 = 30 fps, 50 = 20 fps |
+| rentang frame | `FACE_LOOP_FIRST` / `FACE_LOOP_LAST` di `drawFace()` |
+| ganti frame animasi | generate ulang `include/dasai_frames.h` (script `gen_frames.ps1`) |
+
+Kalau animasi terasa patah-patah, naikkan `FACE_FRAME_MS` ke 50.
+
+### Layar navigasi (kapan belok)
+
+Layar GPS bisa dipakai sebagai penunjuk arah seperti Google Maps: panah belok
+besar, jarak ke belokan, dan nama jalan. Datanya dikirim dari HP:
+
+```
+http://192.168.4.1/nav?kind=left&dist=200&road=Jl.%20Sudirman
+```
+
+| Parameter | Isi |
+|---|---|
+| `kind` | `straight` `left` `right` `slightleft` `slightright` `uturn` `roundabout` |
+| `dist` | jarak ke belokan dalam meter (`50`, `200`, atau `1200` → otomatis tampil km) |
+| `road` | nama jalan, maksimal ~24 karakter |
+
+Selama rute aktif (5 menit sejak kiriman terakhir) layar tidak ikut pindah
+otomatis, jadi panah belokan tetap kelihatan. Di halaman web sudah ada form
+"rute" — pilih arah, isi jarak + nama jalan, kirim.

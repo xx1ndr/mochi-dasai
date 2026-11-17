@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+bridge/node_modules/
+bridge/session/
+bridge/.wwebjs_cache/
+bridge/qr.txt
