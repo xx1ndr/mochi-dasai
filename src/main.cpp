@@ -110,9 +110,21 @@ struct Weather {
 };
 static Weather wx = {false, NAN, NAN, NAN, NAN, -1, 0};
 
-// Lokasi untuk cuaca. Urutan prioritas: GPS -> lokasi dari web (NVS) -> HOME.
-static float wxLat = HOME_LAT, wxLon = HOME_LON;
-static bool  wxLocSet = false;
+// Lokasi untuk cuaca. Urutan prioritas:
+//   GPS -> lokasi dari web/HP (NVS) -> geolokasi IP publik -> HOME.
+static float    wxLat = HOME_LAT, wxLon = HOME_LON;
+static bool     wxLocSet = false;
+
+// Lokasi otomatis dari IP publik ESP32 (tidak disimpan di NVS, refresh 30 mnt).
+static float    wxIpLat = NAN, wxIpLon = NAN;
+static uint32_t wxIpAge = 0;
+
+static const char* wxSource() {
+  if (gps.location.isValid() && gps.location.age() < 5000) return "gps";
+  if (wxLocSet) return "web";
+  if (!isnan(wxIpLat)) return "ip";
+  return "default";
+}
 
 static uint32_t gpsChars = 0;
 static double   tripKm = 0;
@@ -120,10 +132,10 @@ static double   lastLat = 0, lastLon = 0;
 static bool     haveLastPos = false;
 static bool     forceWeather = false;
 
-// ---- perintah belokan (dikirim HP lewat /nav), bikin layar GPS jadi penunjuk arah
+// ---- perintah belokan (/nav manual) + rute otomatis (/goto, OSRM tanpa API key)
 enum NavKind : uint8_t {
   NAV_STRAIGHT, NAV_LEFT, NAV_RIGHT, NAV_SLIGHT_LEFT,
-  NAV_SLIGHT_RIGHT, NAV_UTURN, NAV_ROUNDABOUT
+  NAV_SLIGHT_RIGHT, NAV_UTURN, NAV_ROUNDABOUT, NAV_ARRIVE
 };
 
 struct NavStep {
@@ -135,6 +147,20 @@ struct NavStep {
 };
 static NavStep nav = {false, NAV_STRAIGHT, 0, "", 0};
 static const uint32_t NAV_TTL_MS = 5UL * 60UL * 1000UL;   // 5 menit
+
+// Rute otomatis: petunjuk diambil dari OSRM, maju mengikuti posisi GPS.
+struct RouteStep {
+  uint8_t  kind;
+  uint32_t atM;       // jarak kumulatif dari titik awal sampai belokan ini
+  char     road[26];
+};
+static RouteStep routeSteps[24];
+static uint8_t  routeCount   = 0;
+static uint8_t  routeIdx     = 0;
+static bool     routeActive  = false;
+static uint32_t routeTravelled = 0;
+static uint32_t routeTotal   = 0;
+static double   routeLastLat = 0, routeLastLon = 0;
 
 static bool     apOk    = false;   // hasil WiFi.softAP()
 static uint32_t frameMs = 0;       // lama kirim 1 frame ke OLED
@@ -522,8 +548,74 @@ static bool fetchWeather(float lat, float lon) {
   return true;
 }
 
+// Tanya layanan geolokasi IP publik supaya cuaca mengikuti kota tempat ESP32
+// tersambung WiFi. Gratis, tanpa API key, dan jalan di background walaupun HP
+// tidak membuka halaman web. Akurasinya setingkat kota (bukan titik GPS).
+#if AUTO_IP_GEO
+static void geoIpTask() {
+  static uint32_t lastTry = 0;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  uint32_t now      = millis();
+  uint32_t interval = isnan(wxIpLat) ? 60000UL : 1800000UL;  // coba / refresh
+  if (lastTry != 0 && now - lastTry < interval) return;
+  lastTry = now;
+
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(8000);
+  if (!http.begin(tls, "https://ipwho.is/")) return;
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[geo] HTTP %d\n", code);
+    http.end();
+    return;
+  }
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err || !(doc["success"] | false)) return;
+
+  float la = doc["latitude"] | NAN;
+  float lo = doc["longitude"] | NAN;
+  if (isnan(la) || isnan(lo)) return;
+
+  wxIpLat = la;
+  wxIpLon = lo;
+  wxIpAge = now;
+  Serial.printf("[geo] IP -> %.4f,%.4f (%s)\n", la, lo, doc["city"] | "?");
+}
+#endif // AUTO_IP_GEO
+
 static void weatherTask() {
   static uint32_t lastTry = 0;
+  static float    usedLat = NAN, usedLon = NAN;
+
+  // GPS > lokasi web/HP > IP publik > default HOME.
+  float lat, lon;
+  if (gps.location.isValid() && gps.location.age() < 15000) {
+    lat = (float)gps.location.lat();
+    lon = (float)gps.location.lng();
+  } else if (wxLocSet) {
+    lat = wxLat;
+    lon = wxLon;
+  } else if (!isnan(wxIpLat)) {
+    lat = wxIpLat;
+    lon = wxIpLon;
+  } else {
+    lat = HOME_LAT;
+    lon = HOME_LON;
+  }
+
+  // Lokasi berubah jauh -> ambil cuaca baru sekarang, bukan tunggu 10 menit.
+  if (isnan(usedLat) || fabs(lat - usedLat) > 0.01f || fabs(lon - usedLon) > 0.01f) {
+    usedLat = lat;
+    usedLon = lon;
+    forceWeather = true;
+  }
 
   if (forceWeather) { forceWeather = false; lastTry = 0; }
   if (WiFi.status() != WL_CONNECTED) return;
@@ -533,14 +625,6 @@ static void weatherTask() {
   if (lastTry != 0 && now - lastTry < interval) return;
   lastTry = now;
 
-  // GPS dipakai kalau ada fix; kalau tidak, pakai lokasi yang diset di web,
-  // baru terakhir koordinat cadangan HOME_LAT/HOME_LON di config.h.
-  float lat = wxLocSet ? wxLat : HOME_LAT;
-  float lon = wxLocSet ? wxLon : HOME_LON;
-  if (gps.location.isValid() && gps.location.age() < 15000) {
-    lat = (float)gps.location.lat();
-    lon = (float)gps.location.lng();
-  }
   fetchWeather(lat, lon);
 }
 
@@ -782,10 +866,12 @@ static void blendFromPrev(uint32_t now) {
 // ---- wajah mood (digambar sendiri, bukan bitmap DASAI) ----
 // Dipakai saat mood bukan Senang, saat sedang makan, atau saat ada reaksi
 // elus/marah. Gambar langsung ke buffer oled (render() yang clear & send).
-static void miniHeart(int x, int y) {
-  oled.drawDisc(x - 3, y, 3);
-  oled.drawDisc(x + 3, y, 3);
-  oled.drawTriangle(x - 6, y + 1, x + 6, y + 1, x, y + 8);
+// r = 2 untuk mata hati, r = 3..4 untuk hati mengambang.
+static void moodHeart(int x, int y, int r) {
+  oled.drawDisc(x - r, y, r);
+  oled.drawDisc(x + r, y, r);
+  oled.drawTriangle(x - 2 * r, y + r / 2, x + 2 * r, y + r / 2,
+                    x, y + 2 * r + r / 2);
 }
 
 static void drawMoodFace(uint32_t now) {
@@ -822,50 +908,51 @@ static void drawMoodFace(uint32_t now) {
     oled.drawStr(x, 8, hm);
   }
 
+  // gerak halus: napas pelan, marah cuma getar 1 px (jangan berkedip liar)
   int sh = 0;
-  if (shake || mood == Mood::Angry) sh = ((now / 70) % 2) ? -2 : 2;
+  if (shake || mood == Mood::Angry) sh = ((now / 110) % 2) ? -1 : 1;
   int bob = 0;
   if (mood != Mood::Sleepy && mood != Mood::Angry) {
-    static const int8_t kBob[] = {0, 1, 2, 1};
-    bob = kBob[(now / 200) % 4];
+    static const int8_t kBob[] = {0, 1, 1, 0, -1, -1};
+    bob = kBob[(now / 260) % 6];
   }
   int cx = 64 + sh;
-  int cy = 35 + bob;
+  int cy = 36 + bob;
 
-  // badan + kaki
+  // telinga + kaki digambar lebih dulu supaya menyatu dengan badan
   oled.setDrawColor(1);
-  oled.drawFilledEllipse(cx, cy, 26, 17, U8G2_DRAW_ALL);
-  oled.drawFilledEllipse(cx - 10, cy + 15, 6, 3, U8G2_DRAW_ALL);
-  oled.drawFilledEllipse(cx + 10, cy + 15, 6, 3, U8G2_DRAW_ALL);
+  oled.drawDisc(cx - 15, cy - 11, 6);
+  oled.drawDisc(cx + 15, cy - 11, 6);
+  oled.drawFilledEllipse(cx - 11, cy + 15, 6, 3, U8G2_DRAW_ALL);
+  oled.drawFilledEllipse(cx + 11, cy + 15, 6, 3, U8G2_DRAW_ALL);
+  oled.drawFilledEllipse(cx, cy, 23, 15, U8G2_DRAW_ALL);
 
   // mata
-  int ey = cy - 5, lx = cx - 12, rx = cx + 12;
-  bool blink = (now % 3800) < 140;
+  int ey = cy - 4, lx = cx - 9, rx = cx + 9;
+  bool blink = (now % 4200) < 130;
   oled.setDrawColor(0);
   if (hearts) {
-    miniHeart(lx, ey - 1);
-    miniHeart(rx, ey - 1);
+    moodHeart(lx, ey, 2);
+    moodHeart(rx, ey, 2);
   } else if (mood == Mood::Sleepy) {
-    oled.drawBox(lx - 6, ey, 12, 2);
-    oled.drawBox(rx - 6, ey, 12, 2);
-  } else if (blink || (eating && ((now / 160) % 2) == 0)) {
-    oled.drawHLine(lx - 5, ey, 10);
-    oled.drawHLine(rx - 5, ey, 10);
+    oled.drawEllipse(lx, ey + 2, 5, 3, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
+    oled.drawEllipse(rx, ey + 2, 5, 3, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
+  } else if (blink || (eating && ((now / 200) % 2) == 0)) {
+    oled.drawHLine(lx - 4, ey, 9);
+    oled.drawHLine(rx - 4, ey, 9);
   } else {
-    oled.drawDisc(lx, ey, 4);
-    oled.drawDisc(rx, ey, 4);
+    oled.drawFilledEllipse(lx, ey, 3, 4, U8G2_DRAW_ALL);
+    oled.drawFilledEllipse(rx, ey, 3, 4, U8G2_DRAW_ALL);
     oled.setDrawColor(1);
-    oled.drawPixel(lx - 1, ey - 2);
-    oled.drawPixel(rx - 1, ey - 2);
+    oled.drawDisc(lx - 1, ey - 2, 1);
+    oled.drawDisc(rx - 1, ey - 2, 1);
     oled.setDrawColor(0);
     if (mood == Mood::Angry) {
-      oled.drawLine(lx - 9, ey - 9, lx + 5, ey - 4);
-      oled.drawLine(lx - 9, ey - 8, lx + 5, ey - 3);
-      oled.drawLine(rx + 9, ey - 9, rx - 5, ey - 4);
-      oled.drawLine(rx + 9, ey - 8, rx - 5, ey - 3);
+      oled.drawLine(lx - 5, ey - 8, lx + 4, ey - 5);
+      oled.drawLine(rx + 5, ey - 8, rx - 4, ey - 5);
     } else if (mood == Mood::Sad) {
-      oled.drawLine(lx - 8, ey - 3, lx + 5, ey - 9);
-      oled.drawLine(rx + 8, ey - 3, rx - 5, ey - 9);
+      oled.drawLine(lx - 5, ey - 7, lx + 4, ey - 9);
+      oled.drawLine(rx + 5, ey - 7, rx - 4, ey - 9);
     }
   }
 
@@ -873,62 +960,71 @@ static void drawMoodFace(uint32_t now) {
   int my = cy + 7;
   oled.setDrawColor(0);
   if (eating) {
-    int h = ((now / 160) % 2) == 0 ? 6 : 2;
-    oled.drawFilledEllipse(cx, my, 7, h, U8G2_DRAW_ALL);
-    if (h > 3) {
+    if (((now / 220) % 2) == 0) {
+      oled.drawFilledEllipse(cx, my, 5, 3, U8G2_DRAW_ALL);
       oled.setDrawColor(1);
-      oled.drawBox(cx - 4, my - 1, 8, 2);
+      oled.drawBox(cx - 2, my - 1, 4, 1);
       oled.setDrawColor(0);
+    } else {
+      oled.drawEllipse(cx, my, 5, 2, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
     }
   } else {
     switch (mood) {
       case Mood::Sad:
-        oled.drawEllipse(cx, my + 5, 7, 4, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_UPPER_RIGHT);
+        oled.drawEllipse(cx, my + 4, 5, 3, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_UPPER_RIGHT);
         break;
       case Mood::Angry:
-        oled.drawHLine(cx - 6, my + 1, 13);
-        oled.drawLine(cx - 6, my + 1, cx - 9, my + 4);
-        oled.drawLine(cx + 6, my + 1, cx + 9, my + 4);
+        oled.drawHLine(cx - 4, my + 1, 9);
+        oled.drawLine(cx - 4, my + 1, cx - 6, my + 3);
+        oled.drawLine(cx + 4, my + 1, cx + 6, my + 3);
         break;
       case Mood::Sleepy:
-        oled.drawHLine(cx - 4, my + 2, 8);
+        oled.drawDisc(cx, my + 1, 2);
         break;
       case Mood::Hungry:
-        oled.drawFilledEllipse(cx, my + 1, 3, 3, U8G2_DRAW_ALL);
+        oled.drawFilledEllipse(cx, my + 1, 3, 2, U8G2_DRAW_ALL);
+        oled.drawLine(cx + 4, my, cx + 6, my + 2);
+        oled.drawDisc(cx + 6, my + 3, 1);
         break;
       default:
-        oled.drawEllipse(cx, my - 1, 8, 5, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
+        oled.drawEllipse(cx, my - 1, 5, 3, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
         break;
     }
   }
 
-  // aksesoris sesuai mood
-  if (mood == Mood::Happy || hearts || mood == Mood::Hungry) {
+  // pipi
+  if (mood == Mood::Happy || hearts || eating) {
     oled.setDrawColor(0);
-    oled.drawDisc(cx - 18, cy + 3, 2);
-    oled.drawDisc(cx + 18, cy + 3, 2);
+    oled.drawFilledEllipse(cx - 17, my - 2, 3, 2, U8G2_DRAW_ALL);
+    oled.drawFilledEllipse(cx + 17, my - 2, 3, 2, U8G2_DRAW_ALL);
   }
+
+  // aksesoris: air mata di pipi, "z" naik pelan, tanda marah, hati melayang
   if (mood == Mood::Sad && !hearts) {
-    int drop = 20 + (int)((now / 140) % 18);
-    oled.setDrawColor(1);
-    oled.drawDisc(cx + 32, drop, 1);
+    int ph = (now / 170) % 12;
+    int ty = ey + 6 + ph;
+    oled.setDrawColor(0);
+    oled.drawTriangle(lx - 2, ty - 3, lx - 4, ty, lx, ty);
+    oled.drawDisc(lx - 2, ty, 1);
   }
   if (mood == Mood::Sleepy) {
     oled.setDrawColor(1);
-    oled.setFont(u8g2_font_6x10_tf);
-    int lift = (int)((now / 350) % 8);
-    oled.drawStr(cx + 24, 22 - lift, "z");
+    oled.setFont(u8g2_font_5x7_tf);
+    int ph = (now / 450) % 12;
+    oled.drawStr(cx + 24, cy - 6 - ph, "z");
+    oled.drawStr(cx + 31, cy - 12 - ph, "Z");
+  }
+  if (mood == Mood::Angry) {
+    oled.setDrawColor(1);
+    int ax = cx + 26, ay = cy - 15;
+    oled.drawLine(ax - 3, ay - 3, ax + 3, ay + 3);
+    oled.drawLine(ax + 3, ay - 3, ax - 3, ay + 3);
   }
   if (hearts) {
     oled.setDrawColor(1);
-    int hop = (int)((now / 180) % 5);
-    miniHeart(16, 16 - hop);
-    miniHeart(112, 18 - hop);
-  }
-  if (eating) {
-    oled.setDrawColor(1);
-    int step = (int)((now / 180) % 5);
-    oled.drawBox(cx - 22 + step * 4, 16 + step, 2, 2);
+    int hop = (now / 240) % 6;
+    moodHeart(20, 22 - hop, 4);
+    moodHeart(108, 26 - hop, 3);
   }
   if (now < faceHintUntil && !eating) {
     oled.setDrawColor(1);
@@ -1108,6 +1204,12 @@ static void drawTurnIcon(int cx, int cy, uint8_t kind) {
       oled.drawTriangle(cx + 19, cy + 9, cx + 8, cy + 2, cx + 8, cy + 16);
       break;
 
+    case NAV_ARRIVE:
+      oled.drawDisc(cx, cy - 6, 5);                   // tiang bendera
+      oled.drawBox(cx - 1, cy - 1, 3, 15);
+      oled.drawBox(cx + 2, cy - 12, 12, 8);           // bendera
+      break;
+
     default:  // NAV_STRAIGHT
       oled.drawTriangle(cx, cy - 17, cx - 12, cy + 1, cx + 12, cy + 1);
       oled.drawBox(cx - 5, cy - 1, 10, 19);
@@ -1123,12 +1225,13 @@ static const char* navText(uint8_t kind) {
     case NAV_SLIGHT_RIGHT: return "AGAK KANAN";
     case NAV_UTURN:        return "PUTAR BALIK";
     case NAV_ROUNDABOUT:   return "BUNDARAN";
+    case NAV_ARRIVE:       return "TIBA DI TUJUAN";
     default:               return "LURUS";
   }
 }
 
 static bool navActive() {
-  return nav.valid && (millis() - nav.at) < NAV_TTL_MS;
+  return nav.valid && (routeActive || (millis() - nav.at) < NAV_TTL_MS);
 }
 
 static void drawGps() {
@@ -1524,12 +1627,17 @@ a{color:#3ddc97}
 </form>
 <h3>lokasi cuaca</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
-  GPS sering tidak dapat sinyal di dalam ruangan. Isi koordinat tempatmu supaya
-  cuaca di OLED sesuai lokasi (tersimpan permanen).
+  Cuaca mengikuti GPS modul, lalu lokasi HP (otomatis saat halaman ini dibuka),
+  lalu perkiraan kota dari IP WiFi ESP32. Tanpa sinyal GPS pun tetap berubah
+  saat kamu pindah tempat. Isi manual kalau mau mengunci satu lokasi.
 </p>
 <form onsubmit="event.preventDefault();
   fetch('/location?lat='+encodeURIComponent(la.value)+'&lon='+encodeURIComponent(lo.value))
-  .then(r=>r.json()).then(l=>{ $('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)') })">
+  .then(r=>r.json()).then(l=>{
+    $('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)');
+    $('autoLoc').checked=false; localStorage.setItem('mochiAutoLoc','0');
+    $('geoErr').textContent='Lokasi manual dikunci (auto dimatikan)';
+  })">
   <input id=la type=number step=0.0001 placeholder="latitude, mis -6.2000">
   <input id=lo type=number step=0.0001 placeholder="longitude, mis 106.8167">
   <button>Simpan lokasi</button>
@@ -1537,9 +1645,33 @@ a{color:#3ddc97}
 <p style="font-size:12px">Sekarang: <b id=locNow>-</b> &middot;
   <a href="#" onclick="fetch('/location?reset=1').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+' (default)'});return false">reset</a>
 </p>
-<button class=alt onclick="pakaiGpsHp()">Pakai lokasi HP</button>
-<p id=geoErr style="font-size:12px;color:#f88"></p>
-<h3>rute (layar GPS)</h3>
+<label style="font-size:13px"><input id=autoLoc type=checkbox checked> Ikuti lokasi otomatis</label>
+<p id=geoErr style="font-size:12px;color:#888"></p>
+<button class=alt onclick="locateNow()">Cari lokasi sekarang</button>
+<h3>navigasi otomatis</h3>
+<p style="font-size:12px;color:#888;margin:0 0 6px">
+  Masukkan tujuan (nama tempat atau koordinat). ESP32 mengambil rute dari posisi
+  GPS, lalu otomatis mengganti panah belokan saat kamu bergerak. Butuh GPS fix + internet.
+</p>
+<form onsubmit="event.preventDefault();
+  fetch('/find?q='+encodeURIComponent(q.value)).then(r=>r.json()).then(d=>{
+    if(d.ok){ la2.value=d.lat; lo2.value=d.lon; $('routeErr').textContent=d.name }
+    else $('routeErr').textContent='Tempat tidak ditemukan';
+  })">
+  <input id=q placeholder="cari tempat, misal: Monas Jakarta">
+  <button>Cari tempat</button>
+</form>
+<form onsubmit="event.preventDefault();
+  fetch('/goto?lat='+encodeURIComponent(la2.value)+'&lon='+encodeURIComponent(lo2.value))
+  .then(r=>r.json()).then(d=>{ $('routeErr').textContent=d.msg; navUpd() })">
+  <input id=la2 type=number step=0.0001 placeholder="latitude tujuan">
+  <input id=lo2 type=number step=0.0001 placeholder="longitude tujuan">
+  <button>Mulai navigasi</button>
+</form>
+<p id=routeInfo style="font-size:12px">-</p>
+<p id=routeErr style="font-size:12px;color:#3ddc97"></p>
+<button class=alt onclick="fetch('/goto?stop=1').then(r=>r.json()).then(d=>{$('routeErr').textContent=d.msg;navUpd()})">Hentikan navigasi</button>
+<h3>rute manual (cadangan)</h3>
 <form onsubmit="event.preventDefault();
   fetch('/nav?kind='+encodeURIComponent(k.value)+'&dist='+encodeURIComponent(d.value)+'&road='+encodeURIComponent(r.value))
   .then(()=>upd())">
@@ -1561,25 +1693,57 @@ a{color:#3ddc97}
 const $=id=>document.getElementById(id);
 function upd(){fetch('/api/status').then(r=>r.json()).then(s=>{$('now').textContent='- '+s.screen;$('moodNow').textContent='- '+s.mood})}
 function locUpd(){fetch('/location').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)')})}
-function pakaiGpsHp(){
-  if(!navigator.geolocation){$('geoErr').textContent='Browser tidak mendukung geolocation';return}
-  $('geoErr').textContent='Mencari lokasi HP...';
-  navigator.geolocation.getCurrentPosition(
-    p=>{
-      fetch('/location?lat='+p.coords.latitude.toFixed(5)+'&lon='+p.coords.longitude.toFixed(5))
-        .then(r=>r.json()).then(()=>{$('geoErr').textContent='Lokasi HP tersimpan';locUpd()});
-    },
-    e=>{$('geoErr').textContent='GPS HP gagal (kode '+e.code+'). Isi koordinat manual di atas.'},
-    {enableHighAccuracy:true, timeout:10000}
-  );
+function navUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
+  const g=s.gps||{};
+  $('routeInfo').textContent = s.route_active
+    ? 'Belok '+s.nav+' · sisa '+(s.nav_dist||0)+' m · total '+(s.route_total||0)+' m · '+(g.sats||0)+' satelit'
+    : 'Rute tidak aktif · GPS '+(g.fix?'fix':'cari satelit');
+})}
+function kirimLokasi(lat,lon,sumber){
+  fetch('/location?lat='+Number(lat).toFixed(5)+'&lon='+Number(lon).toFixed(5))
+    .then(r=>r.json()).then(l=>{
+      $('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)');
+      $('geoErr').style.color='#3ddc97';
+      $('geoErr').textContent='Lokasi dari '+sumber+' tersimpan';
+    }).catch(()=>{ $('geoErr').textContent='Gagal mengirim lokasi ke ESP32' });
 }
+function lokasiDariIP(){
+  $('geoErr').style.color='#888';
+  $('geoErr').textContent='GPS HP tidak tersedia, pakai lokasi IP...';
+  fetch('https://ipwho.is/').then(r=>r.json()).then(d=>{
+    if(d.success && isFinite(d.latitude) && isFinite(d.longitude))
+      kirimLokasi(d.latitude,d.longitude,'IP ('+(d.city||'?')+')');
+    else $('geoErr').textContent='Lokasi IP gagal, isi manual saja';
+  }).catch(()=>{ $('geoErr').textContent='Lokasi IP gagal (HP tanpa internet?)' });
+}
+function locateNow(){
+  if(!$('autoLoc').checked) return;
+  if(navigator.geolocation){
+    $('geoErr').style.color='#888';
+    $('geoErr').textContent='Mencari lokasi HP...';
+    navigator.geolocation.getCurrentPosition(
+      p=>kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP'),
+      e=>lokasiDariIP(),
+      {enableHighAccuracy:false, timeout:8000, maximumAge:300000}
+    );
+  } else lokasiDariIP();
+}
+$('autoLoc').onchange=()=>{
+  localStorage.setItem('mochiAutoLoc',$('autoLoc').checked?'1':'0');
+  if($('autoLoc').checked) locateNow();
+  else $('geoErr').textContent='Lokasi otomatis dimatikan';
+};
 $('next').onclick=()=>fetch('/next').then(upd);
 $('refresh').onclick=()=>fetch('/refresh');
 $('clear').onclick=()=>fetch('/clear').then(upd);
 $('feed').onclick=()=>fetch('/feed').then(upd);
 function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
 syncClock(); setInterval(syncClock, 60000);
-upd(); locUpd();
+$('autoLoc').checked = localStorage.getItem('mochiAutoLoc') !== '0';
+upd(); locUpd(); navUpd();
+if($('autoLoc').checked) locateNow();
+setInterval(()=>{ if($('autoLoc').checked) locateNow() }, 600000);
+setInterval(navUpd, 3000);
 </script>
 )HTML";
 
@@ -1638,6 +1802,221 @@ upd(); setInterval(upd, 3000);
 </script>
 )HTML";
 
+// ------------------------------------------------------------ navigasi otomatis
+static String urlEncode(const String& s) {
+  static const char* HEXCH = "0123456789ABCDEF";
+  String out;
+  for (unsigned i = 0; i < s.length(); ++i) {
+    unsigned char c = (unsigned char)s[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+      out += (char)c;
+    else if (c == ' ') out += '+';
+    else { out += '%'; out += HEXCH[c >> 4]; out += HEXCH[c & 15]; }
+  }
+  return out;
+}
+
+static uint8_t mapManeuver(const char* type, const char* modifier) {
+  if (!type) type = "";
+  String m = modifier ? modifier : "";
+  m.toLowerCase();
+  if (strcmp(type, "arrive") == 0) return NAV_ARRIVE;
+  if (m.indexOf("uturn") >= 0) return NAV_UTURN;
+  if (strcmp(type, "roundabout") == 0 || strcmp(type, "rotary") == 0 ||
+      m.indexOf("roundabout") >= 0) return NAV_ROUNDABOUT;
+  if (m.indexOf("slight") >= 0)
+    return m.indexOf("left") >= 0 ? NAV_SLIGHT_LEFT : NAV_SLIGHT_RIGHT;
+  if (m.indexOf("sharp") >= 0)
+    return m.indexOf("left") >= 0 ? NAV_LEFT : NAV_RIGHT;
+  if (m.indexOf("left") >= 0) return NAV_LEFT;
+  if (m.indexOf("right") >= 0) return NAV_RIGHT;
+  return NAV_STRAIGHT;
+}
+
+static double routeStartLat() {
+  if (gps.location.isValid() && gps.location.age() < 5000) return gps.location.lat();
+  if (wxLocSet) return wxLat;
+  if (!isnan(wxIpLat)) return wxIpLat;
+  return HOME_LAT;
+}
+static double routeStartLon() {
+  if (gps.location.isValid() && gps.location.age() < 5000) return gps.location.lng();
+  if (wxLocSet) return wxLon;
+  if (!isnan(wxIpLon)) return wxIpLon;
+  return HOME_LON;
+}
+
+static void applyRouteStep() {
+  if (!routeActive || routeCount == 0) return;
+  if (routeIdx >= routeCount) {
+    nav.kind = NAV_ARRIVE;
+    nav.dist = 0;
+    snprintf(nav.road, sizeof(nav.road), "TIBA DI TUJUAN");
+    nav.at = millis();
+    nav.valid = true;
+    routeActive = false;
+    Serial.println("[nav] tiba di tujuan");
+    return;
+  }
+  const RouteStep& s = routeSteps[routeIdx];
+  long rem = (long)s.atM - (long)routeTravelled;
+  if (rem < 0) rem = 0;
+  if (rem > 60000) rem = 60000;
+  nav.kind = s.kind;
+  nav.dist = (uint16_t)rem;
+  snprintf(nav.road, sizeof(nav.road), "%s", s.road);
+  nav.at = millis();
+  nav.valid = true;
+}
+
+// Coba beberapa server OSRM publik. ESP32 sering gagal di TLS handshake untuk
+// host ini, jadi plain HTTP dicoba lebih dulu (HTTPS jadi cadangan).
+static bool fetchRoute(const char* host, bool secure, double slon, double slat,
+                       double destLon, double destLat, String& payload) {
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  WiFiClient plain;
+  HTTPClient http;
+  http.setConnectTimeout(7000);
+  http.setTimeout(15000);
+  http.setUserAgent("mochi-dasai/1.0");
+
+  char url[240];
+  snprintf(url, sizeof(url),
+           "%s://%s/route/v1/driving/%.6f,%.6f;%.6f,%.6f"
+           "?steps=true&overview=false&geometries=geojson",
+           secure ? "https" : "http", host, slon, slat, destLon, destLat);
+  bool begun = secure ? http.begin(tls, url) : http.begin(plain, url);
+  if (!begun) return false;
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[nav] %s://%s -> HTTP %d\n",
+                  secure ? "https" : "http", host, code);
+    http.end();
+    return false;
+  }
+  payload = http.getString();
+  http.end();
+  return payload.length() > 0;
+}
+
+// Ambil rute dari posisi sekarang ke tujuan, lalu simpan petunjuk belokannya.
+static bool startRoute(double destLat, double destLon, char* msg, size_t msgLen) {
+  if (WiFi.status() != WL_CONNECTED) {
+    snprintf(msg, msgLen, "WiFi belum tersambung");
+    return false;
+  }
+  double slat = routeStartLat(), slon = routeStartLon();
+
+  struct RouteHost { const char* host; bool secure; };
+  static const RouteHost kRouteHosts[] = {
+    {"routing.openstreetmap.de/routed-car", false},
+    {"router.project-osrm.org",             false},
+    {"routing.openstreetmap.de/routed-car", true },
+    {"router.project-osrm.org",             true }
+  };
+  String payload;
+  bool got = false;
+  for (unsigned i = 0; i < sizeof(kRouteHosts) / sizeof(kRouteHosts[0]); ++i) {
+    if (fetchRoute(kRouteHosts[i].host, kRouteHosts[i].secure,
+                   slon, slat, destLon, destLat, payload)) {
+      got = true;
+      break;
+    }
+  }
+  if (!got) {
+    snprintf(msg, msgLen, "Server rute tidak bisa diakses");
+    return false;
+  }
+
+  // Filter supaya ArduinoJson tidak menyimpan intersections & geometry.
+  JsonDocument filter;
+  filter["code"] = true;
+  filter["routes"][0]["legs"][0]["steps"][0]["maneuver"]["type"] = true;
+  filter["routes"][0]["legs"][0]["steps"][0]["maneuver"]["modifier"] = true;
+  filter["routes"][0]["legs"][0]["steps"][0]["name"] = true;
+  filter["routes"][0]["legs"][0]["steps"][0]["distance"] = true;
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, payload, DeserializationOption::Filter(filter));
+  if (err) {
+    snprintf(msg, msgLen, "JSON rute error");
+    return false;
+  }
+  JsonArray steps = doc["routes"][0]["legs"][0]["steps"];
+  if (steps.size() < 2) {
+    snprintf(msg, msgLen, "Rute tidak ditemukan");
+    return false;
+  }
+
+  routeCount = 0;
+  uint32_t cum = 0;
+  for (size_t i = 0; i + 1 < steps.size() && routeCount < 24; ++i) {
+    JsonObject st = steps[i];
+    cum += (uint32_t)(st["distance"] | 0.0);
+    JsonObject mv = steps[i + 1]["maneuver"];
+    const char* type = mv["type"] | "";
+    const char* mod  = mv["modifier"] | "";
+    const char* name = st["name"] | "";
+    if (!name || !*name) name = steps[i + 1]["name"] | "";
+
+    RouteStep& r = routeSteps[routeCount++];
+    r.kind = mapManeuver(type, mod);
+    r.atM  = cum;
+    snprintf(r.road, sizeof(r.road), "%s", name ? name : "");
+  }
+  if (routeCount == 0) {
+    snprintf(msg, msgLen, "Rute kosong");
+    return false;
+  }
+
+  routeIdx = 0;
+  routeTravelled = 0;
+  routeTotal = cum;
+  routeLastLat = slat;
+  routeLastLon = slon;
+  routeActive = true;
+  screen = SCR_GPS;
+  applyRouteStep();
+
+  snprintf(msg, msgLen, "Rute aktif: %d belokan, %u m",
+           (int)routeCount, (unsigned)routeTotal);
+  Serial.printf("[nav] %s (dari %.5f,%.5f)\n", msg, slat, slon);
+  return true;
+}
+
+// Maju ke petunjuk berikutnya mengikuti jarak yang benar-benar ditempuh GPS.
+static void navTask() {
+  if (!routeActive || routeCount == 0) return;
+  if (!gps.location.isValid() || gps.location.age() > 5000) return;
+
+  double lat = gps.location.lat();
+  double lon = gps.location.lng();
+  double d = TinyGPSPlus::distanceBetween(routeLastLat, routeLastLon, lat, lon);
+  if (d >= 0 && d < 500.0) {
+    routeTravelled += (uint32_t)d;
+    routeLastLat = lat;
+    routeLastLon = lon;
+  } else if (d >= 500.0) {
+    routeLastLat = lat;                 // lonjakan sinyal: reset acuan
+    routeLastLon = lon;
+  }
+
+  static uint8_t  shownIdx = 255;
+  static uint32_t lastUpd  = 0;
+  while (routeIdx < routeCount && routeTravelled >= routeSteps[routeIdx].atM)
+    ++routeIdx;
+
+  if (routeIdx != shownIdx || millis() - lastUpd > 1000) {
+    shownIdx = routeIdx;
+    lastUpd  = millis();
+    applyRouteStep();
+  }
+}
+
 static void setupWeb() {
   web.on("/", HTTP_GET, []() { web.send_P(200, "text/html", PAGE_HTML); });
   web.on("/maps", HTTP_GET, []() { web.send_P(200, "text/html", MAP_HTML); });
@@ -1691,6 +2070,97 @@ static void setupWeb() {
     snprintf(out, sizeof(out), "{\"lat\":%.4f,\"lon\":%.4f,\"set\":%s}",
              wxLat, wxLon, wxLocSet ? "true" : "false");
     web.send(200, "application/json", out);
+  });
+
+  // Cari nama tempat -> koordinat (Nominatim, gratis, tanpa API key).
+  web.on("/find", HTTP_GET, []() {
+    if (!web.hasArg("q") || web.arg("q").length() == 0) {
+      web.send(200, "application/json", "{\"ok\":false}");
+      return;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      web.send(200, "application/json", "{\"ok\":false,\"msg\":\"WiFi mati\"}");
+      return;
+    }
+    String url = "https://nominatim.openstreetmap.org/search?q=" +
+                 urlEncode(web.arg("q")) + "&format=jsonv2&limit=1";
+
+    WiFiClientSecure tls;
+    tls.setInsecure();
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(9000);
+    http.setUserAgent("mochi-dasai/1.0 (ESP32)");
+    if (!http.begin(tls, url)) {
+      web.send(200, "application/json", "{\"ok\":false}");
+      return;
+    }
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+      http.end();
+      web.send(200, "application/json", "{\"ok\":false,\"msg\":\"HTTP\"}");
+      return;
+    }
+    String payload = http.getString();
+    http.end();
+
+    JsonDocument doc;
+    if (deserializeJson(doc, payload)) {
+      web.send(200, "application/json", "{\"ok\":false}");
+      return;
+    }
+    JsonArray arr = doc.as<JsonArray>();
+    if (arr.size() == 0) {
+      web.send(200, "application/json", "{\"ok\":false}");
+      return;
+    }
+    double la = atof(arr[0]["lat"] | "0");
+    double lo = atof(arr[0]["lon"] | "0");
+    const char* nm = arr[0]["display_name"] | "";
+
+    JsonDocument out;
+    out["ok"]   = true;
+    out["lat"]  = la;
+    out["lon"]  = lo;
+    out["name"] = nm;
+    String body;
+    serializeJson(out, body);
+    web.send(200, "application/json", body);
+  });
+
+  // Navigasi otomatis: /goto?lat=&lon=  atau  /goto?stop=1
+  web.on("/goto", HTTP_GET, []() {
+    if (web.hasArg("stop")) {
+      routeActive = false;
+      routeCount  = 0;
+      nav.valid   = false;
+      web.send(200, "application/json",
+               "{\"ok\":true,\"msg\":\"Navigasi dihentikan\"}");
+      return;
+    }
+    if (!web.hasArg("lat") || !web.hasArg("lon")) {
+      web.send(200, "application/json",
+               "{\"ok\":false,\"msg\":\"Isi lat & lon tujuan\"}");
+      return;
+    }
+    double la = web.arg("lat").toDouble();
+    double lo = web.arg("lon").toDouble();
+    if (la < -90 || la > 90 || lo < -180 || lo > 180) {
+      web.send(200, "application/json",
+               "{\"ok\":false,\"msg\":\"Koordinat tidak valid\"}");
+      return;
+    }
+    char msg[96];
+    bool ok = startRoute(la, lo, msg, sizeof(msg));
+
+    JsonDocument out;
+    out["ok"]    = ok;
+    out["msg"]   = msg;
+    out["steps"] = routeCount;
+    out["total"] = routeTotal;
+    String body;
+    serializeJson(out, body);
+    web.send(200, "application/json", body);
   });
 
   // notifikasi lewat GET: /notify?from=..&text=..
@@ -1752,6 +2222,7 @@ static void setupWeb() {
     if (d < 0) d = 0;
     if (d > 60000) d = 60000;
 
+    routeActive = false;                 // rute manual menimpa rute otomatis
     nav.kind  = kind;
     nav.dist  = (uint16_t)d;
     nav.at    = millis();
@@ -1846,11 +2317,18 @@ static void setupWeb() {
     doc["wx_lat"]    = wxLat;
     doc["wx_lon"]    = wxLon;
     doc["wx_loc_set"] = wxLocSet;
+    doc["wx_src"]     = wxSource();        // gps | web | ip | default
+    if (!isnan(wxIpLat)) {
+      doc["wx_ip_lat"] = wxIpLat;
+      doc["wx_ip_lon"] = wxIpLon;
+    }
     doc["last_fed"] = lastFed;
     doc["unread"]   = unreadCount;
     doc["messages"] = inboxCount;
     doc["nav"]      = navActive() ? navText(nav.kind) : "";
     doc["nav_dist"] = navActive() ? nav.dist : 0;
+    doc["route_active"] = routeActive;
+    doc["route_total"]  = routeTotal;
 
     JsonObject g = doc["gps"].to<JsonObject>();
     bool fix = gps.location.isValid() && gps.location.age() < 5000;
@@ -2013,6 +2491,7 @@ void loop() {
   static bool     ipLogged   = false;
 
   pumpGps();
+  navTask();
   updateButton();
   updateSerialInput();
   wifiTask();
@@ -2020,6 +2499,9 @@ void loop() {
   telegramTask();
   timeTask();
   updateHunger();
+#if AUTO_IP_GEO
+  geoIpTask();
+#endif
   weatherTask();
   web.handleClient();
 

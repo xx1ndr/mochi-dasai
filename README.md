@@ -191,7 +191,10 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 | `/location?reset=1` | kembali ke `HOME_LAT`/`HOME_LON` |
 | `/clear` | hapus semua notifikasi di inbox |
 | `/notify?from=..&text=..` | kirim notifikasi |
-| `/nav?kind=left&dist=200&road=..` | kirim perintah belokan ke layar GPS |
+| `/goto?lat=&lon=` | mulai navigasi otomatis (turn-by-turn, OSRM) |
+| `/find?q=Monas Jakarta` | cari nama tempat jadi koordinat (Nominatim) |
+| `/goto?stop=1` | hentikan navigasi otomatis |
+| `/nav?kind=left&dist=200&road=..` | kirim perintah belokan manual ke layar GPS |
 | `/face?frame=45` | diagnosa: diamkan animasi DASAI di satu frame |
 | `/face?auto=1` | lanjutkan animasi wajah normal |
 | `/maps` (atau `/map`) | monitor GPS: peta Google Maps live + marker, auto-refresh 3 detik |
@@ -382,13 +385,42 @@ memilih ekspresi berikutnya. Perilaku yang sama dipakai untuk GIF di
 
 Kalau animasi terasa patah-patah, naikkan `FACE_FRAME_MS` ke 50.
 
-### Layar navigasi (kapan belok)
+### Navigasi otomatis (turn-by-turn)
 
-Layar GPS bisa dipakai sebagai penunjuk arah seperti Google Maps: panah belok
-besar, jarak ke belokan, dan nama jalan. Datanya dikirim dari HP:
+Cukup masukkan tujuan, ESP32 yang menentukan belokannya:
+
+1. Pastikan GPS dapat fix (cek `/api/status` → `gps.fix: true`) dan WiFi
+   tersambung internet.
+2. Buka halaman web → **navigasi otomatis**.
+3. Ketik nama tempat di **Cari tempat** (misal `Monas Jakarta`) → klik **Cari**;
+   koordinat tujuan otomatis terisi. Boleh juga isi `latitude`/`longitude`
+   langsung.
+4. Klik **Mulai navigasi**. OLED langsung menampilkan panah belokan pertama.
+
+Selanjutnya **otomatis**: saat kamu bergerak, jarak ke belokan dihitung mundur
+dari posisi GPS, dan panah berganti ke belokan berikutnya. Sesampainya di tujuan
+muncul **TIBA DI TUJUAN**. Tombol **Hentikan navigasi** mengakhiri rute.
+
+Rute diambil dari **OSRM** (`router.project-osrm.org`) dan geocoding dari
+**Nominatim** — keduanya gratis tanpa API key. Titik awal rute = posisi GPS
+(atau lokasi cuaca bila GPS belum fix). Akurasi geocoding IP setingkat kota.
+
+Endpoint:
 
 ```
-http://192.168.4.1/nav?kind=left&dist=200&road=Jl.%20Sudirman
+/goto?lat=-6.1754&lon=106.8272     mulai rute otomatis
+/find?q=Monas%20Jakarta            cari tempat -> lat/lon
+/goto?stop=1                       hentikan rute
+```
+
+Status rute ada di `/api/status`: `route_active`, `route_total`, `nav`, `nav_dist`.
+
+### Rute manual (cadangan)
+
+Tanpa rute otomatis, panah bisa dikirim satu per satu dari HP:
+
+```
+http://192.168.1.8/nav?kind=left&dist=200&road=Jl.%20Sudirman
 ```
 
 | Parameter | Isi |
@@ -398,5 +430,4 @@ http://192.168.4.1/nav?kind=left&dist=200&road=Jl.%20Sudirman
 | `road` | nama jalan, maksimal ~24 karakter |
 
 Selama rute aktif (5 menit sejak kiriman terakhir) layar tidak ikut pindah
-otomatis, jadi panah belokan tetap kelihatan. Di halaman web sudah ada form
-"rute" — pilih arah, isi jarak + nama jalan, kirim.
+otomatis, jadi panah belokan tetap kelihatan.

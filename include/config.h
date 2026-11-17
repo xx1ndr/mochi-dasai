@@ -27,9 +27,14 @@
 #define TZ_STRING "WIB-7"
 
 // ---------------- Lokasi cadangan ----------------
-// Dipakai untuk cuaca kalau GPS belum dapat fix.
+// Dipakai untuk cuaca kalau GPS belum dapat fix dan lokasi belum diset di web.
 #define HOME_LAT  -6.200000
 #define HOME_LON 106.816666
+
+// 1 = kalau GPS tidak ada fix, tebak kota dari IP publik ESP32 (gratis, tanpa
+//     API key). Jalan otomatis tiap 30 menit. Akurasi setingkat kota.
+// 0 = pakai HOME_LAT/HOME_LON saja sampai lokasi diset manual dari web.
+#define AUTO_IP_GEO 1
 
 // ---------------- MQTT (opsional) ----------------
 // Kosongkan MQTT_HOST kalau tidak pakai broker MQTT.
