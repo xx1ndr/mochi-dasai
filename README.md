@@ -42,7 +42,7 @@ Layar tambahan: Menu, Ubah mood, dan Makan (muncul lewat sentuhan).
 | OLED 0.96" SSD1306 | 128x64, I2C, alamat 0x3C |
 | GPS module | NEO-6M / ATGM336H / u-blox MAX-M10S (UART) |
 | Sensor sentuh | TTP223 (OUT aktif HIGH) ke GPIO3 — layar tetap bisa dikontrol dari web |
-| Buzzer | buzzer aktif 3.3V — **opsional**, tanpa ini notif tetap tampil |
+| Buzzer | buzzer aktif 3.3V di GPIO10 — bunyi saat notifikasi WA/Telegram, tombol, dan mood |
 | Kabel | 8-10 jumper female-female |
 
 Catatan:
@@ -184,7 +184,7 @@ Sensor TTP223 sudah diaktifkan di `include/config.h`:
 |---|---|---|
 | `HAS_BUTTON` | `1` | sensor/button aktif di GPIO3 |
 | `BTN_ACTIVE` | `HIGH` | TTP223 aktif HIGH (tombol ke GND → ubah ke `LOW`) |
-| `HAS_BUZZER` | `0` | `1` = buzzer dipasang di GPIO10 |
+| `HAS_BUZZER` | `1` | `0` = mati kalau buzzer tidak dipasang. Notifikasi = 2 nada naik, tombol = 1 nada pendek |
 | `AUTO_ROTATE_MS` | `0` | `0` = mati (disarankan supaya tidak bertabrakan dengan menu) |
 | `HUNGER_SEC` | `3600` | detik sampai mochi lapar setelah terakhir makan |
 | `AP_ONLY` | `0` | hotspot + STA, supaya bridge WA di PC bisa mengirim notif lewat IP LAN |

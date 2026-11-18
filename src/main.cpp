@@ -226,6 +226,31 @@ static void beep() {
   tone(PIN_BUZZ, 2600, 70);
 }
 
+// Notifikasi: dua nada naik supaya beda dari bunyi tombol/mood.
+// Non-blocking: dijadwalkan lewat state, tidak memakai delay().
+static uint32_t notifyToneAt = 0;
+static uint8_t  notifyStep   = 0;
+
+static void notifyBeep() {
+  if (!HAS_BUZZER) return;
+  notifyStep = 1;
+  notifyToneAt = millis();
+  tone(PIN_BUZZ, 1800, 90);
+}
+
+static void notifyBeepTask() {
+  if (!HAS_BUZZER || notifyStep == 0) return;
+  uint32_t now = millis();
+  if (notifyStep == 1 && now - notifyToneAt >= 130) {
+    notifyStep = 2;
+    notifyToneAt = now;
+    tone(PIN_BUZZ, 2400, 110);
+  } else if (notifyStep == 2 && now - notifyToneAt >= 200) {
+    notifyStep = 0;
+    noTone(PIN_BUZZ);
+  }
+}
+
 static void addNotification(const char* src, const char* from, const char* text) {
   for (int i = INBOX_MAX - 1; i > 0; --i) inbox[i] = inbox[i - 1];
   sanitize(inbox[0].src, sizeof(inbox[0].src), (src && *src) ? src : "?");
@@ -235,7 +260,7 @@ static void addNotification(const char* src, const char* from, const char* text)
   inbox[0].unread = true;
   if (inboxCount < INBOX_MAX) inboxCount++;
   if (unreadCount < 99) unreadCount++;
-  beep();
+  notifyBeep();
   Serial.printf("[%s] %s: %s\n", inbox[0].src, inbox[0].from, inbox[0].text);
 }
 
@@ -2628,22 +2653,21 @@ void setup() {
   oled.setBusClock(400000);
   oled.setContrast(180);
 
-  // Splash: pakai frame GIF idle asli (sudah 128x64 + dither bersih),
-  // bukan kotak mata. Contrast naik pelan -> kesan menyala halus.
-  oled.setContrast(30);
-  for (int i = 0; i < 14; ++i) {
-    oled.setContrast(30 + (i * 150) / 13);
-    oled.clearBuffer();
-    oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H,
-                  moodFrame(MOOD_IDLE_SET, i));
-    oled.sendBuffer();
-    uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[MOOD_IDLE_SET]) /
+  // Splash restart: sleepy.gif (set Mood::Sleepy) sesuai permintaan.
+  // Full contrast sejak awal -- tidak ada efek redup/kedip.
+  {
+    const uint8_t set = (uint8_t)Mood::Sleepy;
+    uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[set]) /
                                MOOD_FRAME_BYTES);
-    uint16_t d = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + i]) * 10;
-    delay(d ? d : 70);
+    for (int i = 0; i < 20; ++i) {
+      oled.clearBuffer();
+      oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(set, i));
+      oled.sendBuffer();
+      uint16_t d = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + i]) * 10;
+      delay(d ? d : 70);
+    }
   }
-  oled.setContrast(180);
-  faceStartFrame = 14;                  // lanjutkan dari frame splash, bukan ulang
+  faceStartFrame = 0;                   // lanjut ke idle normal dari frame 0
 
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 
@@ -2712,6 +2736,7 @@ void loop() {
   pumpGps();
   navTask();
   updateButton();
+  notifyBeepTask();
   updateSerialInput();
   wifiTask();
   mqttTask();

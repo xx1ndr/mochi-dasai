@@ -65,7 +65,7 @@
 
 // ---------------- Fitur opsional ----------------
 #define HAS_BUTTON 1      // 1 kalau sensor sentuh / tombol sudah dipasang
-#define HAS_BUZZER 0      // 1 kalau buzzer sudah dipasang
+#define HAS_BUZZER 1      // 1 kalau buzzer sudah dipasang (notif + tombol)
 #define AUTO_ROTATE_MS 0      // 0 = mati (disarankan saat pakai sensor sentuh)
 
 // ---------------- Mood & rasa lapar ----------------
