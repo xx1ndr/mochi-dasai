@@ -452,8 +452,13 @@ Status rute ada di `/api/status`: `route_active`, `route_total`, `nav`, `nav_dis
 Tanpa rute otomatis, panah bisa dikirim satu per satu dari HP:
 
 ```
-http://192.168.1.8/nav?kind=left&dist=200&road=Jl.%20Sudirman
+http://192.168.4.1/nav?kind=left&dist=200&road=Jl.%20Sudirman
 ```
+
+> Alamat: `192.168.4.1` saat ESP32 masuk AP fallback `mochi-dasai`
+> (password `mochi1234`) — HP/PC harus tersambung ke hotspot ini. Kalau ESP32
+> berhasil join WiFi `WiFI_RUMAH`, pakai IP LAN yang tampil di layar sistem
+> (`ip ...`) atau di `/api/status`, misalnya `http://192.168.1.8/`.
 
 | Parameter | Isi |
 |---|---|
