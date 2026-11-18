@@ -156,9 +156,11 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
   `configTzTime(TZ_STRING, ...)`, bukan `configTime(0,0,...)` — yang terakhir
   diam-diam mengubah TZ jadi UTC sehingga jam tampil 7 jam lebih awal (dulu
   terjadi setelah tombol **Refresh** / sinkron ulang tiap jam).
-- **Cuaca mengikuti lokasi.** Urutan prioritas: GPS (kalau ada fix) → lokasi yang
-  diset dari halaman web → `HOME_LAT`/`HOME_LON` di `config.h`. Karena GPS sering
-  tidak dapat sinyal di dalam ruangan, isi koordinatmu di halaman web
+- **Cuaca mengikuti lokasi.** Urutan prioritas: lokasi dari PC lewat kabel serial
+  → GPS (kalau ada fix) → lokasi yang diset dari halaman web → geolokasi IP →
+  `HOME_LAT`/`HOME_LON` di `config.h`. Karena GPS sering tidak dapat sinyal di
+  dalam ruangan, bridge PC mengirim lokasi (IP publik) lewat kabel. Bisa juga isi
+  koordinatmu di halaman web
   (**lokasi cuaca** → *Simpan lokasi*, atau tombol *Pakai lokasi HP*). Lokasi ini
   tersimpan di NVS dan dipakai juga oleh peta di `/maps`. Cek lewat
   `/location?reset=1` kalau mau kembali ke koordinat default.
@@ -275,11 +277,19 @@ npm start
 `C:\Program Files\Google\Chrome\Application\chrome.exe` (Lewati unduhan Chromium
 Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
 
-**Notifikasi dikirim lewat KABEL USB (serial), bukan WiFi.** `bridge.js`
-membuka port `COM8` (115200 baud) dan menulis `N<pengirim>|<pesan>\n` untuk
-tiap pesan WhatsApp masuk. Firmware menerimanya di `updateSerialInput()` lalu
-memunculkan notifikasi `WA` di OLED + badge `MSG n`. Jadi ESP32 tidak perlu
-join WiFi yang sama dengan PC agar notifikasi WA muncul. Kalau port beda:
+**Notifikasi, jam, dan cuaca dikirim lewat KABEL USB (serial), bukan WiFi.**
+`bridge.js` membuka port `COM8` (115200 baud) dan menulis:
+
+- `N<pengirim>|<pesan>\n` untuk tiap pesan WhatsApp masuk,
+- `T<epoch>\n` jam dari PC (firmware yang konversi ke WIB),
+- `G<lat>|<lon>\n` lokasi cuaca,
+- `W<temp>|<rh>|<feels>|<wind>|<code>\n` cuaca dari Open-Meteo.
+
+Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi
+ESP32 tidak perlu join WiFi `WiFI_RUMAH` supaya jam/cuaca/notif WA jalan. GPS tetap
+membaca modulnya sendiri (butuh fix satelit, taruh di luar ruangan); kalau tidak
+ada fix, layar GPS menampilkan lokasi yang dikirim PC lewat kabel. Kalau port
+bedanya:
 
 ```bash
 set ESP_PORT=COM3 && npm start   # Windows CMD

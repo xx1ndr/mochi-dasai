@@ -54,6 +54,7 @@ for ($f = 0; $f -lt $count; $f++) {
         if ($sx -ge 320) { $sx = 319 }
         if ($sy -ge 180) { $sy = 179 }
         $c = $bmp.GetPixel($sx, $sy)
+        # u8g2 drawXBMP = LSB dulu (bit 0 = piksel paling kiri).
         if (($c.R + $c.G + $c.B) -ge $Threshold) { $byte = $byte -bor (1 -shl $bit) }
       }
       $row.Add([byte]$byte)

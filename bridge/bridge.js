@@ -19,6 +19,13 @@ const BAUD         = 115200;
 const IGNORE_GROUPS = process.env.IGNORE_GROUPS === '1';
 const IGNORE_SELF   = process.env.IGNORE_SELF !== '0';
 
+// Jam & cuaca juga dikirim lewat kabel (ESP32 tidak perlu WiFi WiFI_RUMAH).
+const WX_LAT        = process.env.WX_LAT ? parseFloat(process.env.WX_LAT) : null;
+const WX_LON        = process.env.WX_LON ? parseFloat(process.env.WX_LON) : null;
+const DEFAULT_LAT   = -6.2000;   // Jakarta (sama dengan HOME_LAT di firmware)
+const DEFAULT_LON   = 106.8167;
+const SYNC_INTERVAL = 10 * 60 * 1000;   // kirim ulang tiap 10 menit
+
 // Pakai Chrome yang sudah terpasang di PC (Puppeteer tidak perlu download Chromium).
 const CHROME_PATH = process.env.CHROME_PATH ||
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -36,7 +43,10 @@ function bukaSerial() {
       dtr: false,
       rts: false,           // jangan toggle DTR/RTS (bisa reset ESP32)
     });
-    esp.on('open', () => console.log(`[serial] terhubung ${ESP_PORT} @ ${BAUD}`));
+    esp.on('open', () => {
+      console.log(`[serial] terhubung ${ESP_PORT} @ ${BAUD}`);
+      kirimJamCuaca();                    // jam + cuaca langsung setelah kabel tersambung
+    });
     esp.on('error', (e) => console.error(`[serial] ${e.message}`));
     esp.on('close', () => console.error('[serial] terputus'));
   } catch (e) {
@@ -47,6 +57,87 @@ function bukaSerial() {
 bukaSerial();
 // Buka ulang otomatis kalau kabel dicolok lagi / port sempat error.
 setInterval(() => { if (!esp || !esp.isOpen) bukaSerial(); }, 3000);
+
+// ---------------- jam & cuaca dari PC -> ESP32 lewat kabel ----------------
+function tulisEsp(baris) {
+  if (!esp || !esp.isOpen) return false;
+  esp.write(baris, (err) => {
+    if (err) console.error('[serial] gagal kirim:', err.message);
+  });
+  return true;
+}
+
+async function fetchJson(url, ms = 8000) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ac.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+let lastLat = null, lastLon = null;
+
+async function lokasiCuaca() {
+  if (WX_LAT !== null && WX_LON !== null &&
+      Number.isFinite(WX_LAT) && Number.isFinite(WX_LON)) {
+    return [WX_LAT, WX_LON];
+  }
+  if (lastLat !== null) return [lastLat, lastLon];
+  try {
+    const g = await fetchJson('https://ipwho.is/');
+    if (g && g.success && Number.isFinite(g.latitude) && Number.isFinite(g.longitude)) {
+      lastLat = g.latitude;
+      lastLon = g.longitude;
+      console.log(`[cuaca] lokasi IP: ${lastLat.toFixed(4)},${lastLon.toFixed(4)} (${g.city || '?'})`);
+      return [lastLat, lastLon];
+    }
+  } catch (e) {
+    console.error(`[cuaca] geolokasi gagal: ${e.message}`);
+  }
+  return [DEFAULT_LAT, DEFAULT_LON];
+}
+
+let syncing = false;
+
+async function kirimJamCuaca() {
+  if (syncing) return;
+  syncing = true;
+  try {
+    if (!esp || !esp.isOpen) return;
+
+    // Jam: PC sudah tersinkron NTP, kirim epoch UTC; firmware yang ubah ke WIB.
+    tulisEsp(`T${Math.floor(Date.now() / 1000)}\n`);
+
+    const [lat, lon] = await lokasiCuaca();
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m`;
+    const j = await fetchJson(url);
+    const c = j && j.current;
+    if (!c || !Number.isFinite(c.temperature_2m)) {
+      console.error('[cuaca] respons Open-Meteo tidak valid');
+      return;
+    }
+
+    tulisEsp(`G${lat.toFixed(4)}|${lon.toFixed(4)}\n`);
+    const temp   = Number(c.temperature_2m).toFixed(1);
+    const rh     = Number(c.relative_humidity_2m || 0).toFixed(0);
+    const feels  = Number(c.apparent_temperature || c.temperature_2m).toFixed(1);
+    const wind   = Number(c.wind_speed_10m || 0).toFixed(1);
+    const code   = Number.isFinite(c.weather_code) ? c.weather_code : -1;
+    tulisEsp(`W${temp}|${rh}|${feels}|${wind}|${code}\n`);
+    console.log(`[cuaca] dikirim: ${temp}C RH${rh}% code=${code} (${lat.toFixed(2)},${lon.toFixed(2)})`);
+  } catch (e) {
+    console.error(`[cuaca] gagal ambil/kirim: ${e.message}`);
+  } finally {
+    syncing = false;
+  }
+}
+
+setInterval(() => { if (esp && esp.isOpen) kirimJamCuaca(); }, SYNC_INTERVAL);
 
 function kirimKeEsp(from, text) {
   if (!esp || !esp.isOpen) {

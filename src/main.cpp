@@ -110,6 +110,7 @@ struct Weather {
   uint32_t updated;
 };
 static Weather wx = {false, NAN, NAN, NAN, NAN, -1, 0};
+static bool     wxFromSerial = false;   // data cuaca dikirim PC lewat kabel USB
 
 // Lokasi untuk cuaca. Urutan prioritas:
 //   GPS -> lokasi dari web/HP (NVS) -> geolokasi IP publik -> HOME.
@@ -121,6 +122,7 @@ static float    wxIpLat = NAN, wxIpLon = NAN;
 static uint32_t wxIpAge = 0;
 
 static const char* wxSource() {
+  if (wxFromSerial) return "serial";
   if (gps.location.isValid() && gps.location.age() < 5000) return "gps";
   if (wxLocSet) return "web";
   if (!isnan(wxIpLat)) return "ip";
@@ -854,8 +856,9 @@ static void blendFromPrev(uint32_t now) {
     for (int x = 0; x < DASAI_FRAME_W; ++x) {
       int th = kBayer[(y & 3) * 4 + (x & 3)] * 17;  // 0..255
       if (th <= progress) continue;                 // pakai pixel baru
-      int idx = y * (DASAI_FRAME_W / 8) + (x >> 3);
-      uint8_t mask = (uint8_t)(1u << (7 - (x & 7)));
+      // framebuffer u8g2 = vertikal, LSB di atas: byte = baris 8 px, bit = y%8
+      int idx = (y & ~7) * (DASAI_FRAME_W / 8) + x;
+      uint8_t mask = (uint8_t)(1u << (y & 7));
       if (facePrevBuf[idx] & mask) buf[idx] |= mask;
       else                         buf[idx] &= (uint8_t)~mask;
     }
@@ -880,10 +883,15 @@ static void drawMoodBadge(uint32_t now) {
   else if (hearts) label = "Elus";
   else if (shake)  label = "Hmph";
 
+  // Badge diletakkan di kiri-bawah: area itu hitam di semua frame GIF, jadi
+  // teks putih tidak lagi tertutup karakter (di kiri-atas dulu jadi tidak
+  // terbaca). Latar hitam juga dipaksa supaya aman kalau GIF diganti.
+  oled.setDrawColor(0);
+  oled.drawBox(0, 55, 64, 9);
   oled.setDrawColor(1);
   oled.setFont(u8g2_font_5x7_tf);
 
-  int ix = 3, iy = 3;
+  int ix = 3, iy = 59;
   if (hearts) {
     moodHeart(ix, iy, 1);
   } else if (mood == Mood::Sad) {
@@ -893,13 +901,13 @@ static void drawMoodBadge(uint32_t now) {
     oled.drawLine(ix - 3, iy - 3, ix + 3, iy + 3);
     oled.drawLine(ix + 3, iy - 3, ix - 3, iy + 3);
   } else if (mood == Mood::Sleepy) {
-    oled.drawStr(0, iy + 4, "z");
+    oled.drawStr(0, 63, "z");
   } else {
     // lapar / makan: mangkuk kecil
     oled.drawBox(ix - 3, iy + 1, 6, 2);
     oled.drawBox(ix - 2, iy - 1, 4, 1);
   }
-  oled.drawStr(10, 6, label);
+  oled.drawStr(10, 63, label);
 }
 static void drawFace() {
   // Animasi dari GIF mi_bef: 77 frame, delay aslinya 60/70 ms, diputar urut.
@@ -1124,6 +1132,12 @@ static void drawGps() {
     snprintf(b, sizeof(b), "lat %9.5f", gps.location.lat());
     oled.drawStr(0, 57, b);
     snprintf(b, sizeof(b), "lon %9.5f", gps.location.lng());
+    oled.drawStr(0, 64, b);
+  } else if (wxFromSerial && !isnan(wxLat) && !isnan(wxLon)) {
+    // Tidak ada fix satelit (misal di dalam ruangan): tampilkan lokasi yang
+    // dikirim PC lewat kabel supaya layar GPS tetap informasi.
+    oled.drawStr(0, 57, "lokasi dari PC:");
+    snprintf(b, sizeof(b), "%.5f,%.5f", wxLat, wxLon);
     oled.drawStr(0, 64, b);
   } else {
     oled.drawStr(0, 57, "cari satelit... taruh di luar ruangan");
@@ -1408,38 +1422,120 @@ static void updateButton() {
 }
 
 // Serial USB: 's' = sentuh pendek, 'l' = tahan (tes tanpa tombol).
-// Notifikasi dari bridge WA lewat kabel:  N<pengirim>|<pesan>\n
+// Perintah dari bridge PC lewat kabel USB (tanpa WiFi):
+//   N<pengirim>|<pesan>\n             notifikasi WhatsApp
+//   T<epoch UTC>\n                    jam dari PC
+//   W<temp>|<rh>|<feels>|<wind>|<code>\n  cuaca dari PC
+//   G<lat>|<lon>\n                    lokasi cuaca dari PC
+static void handleSerialLine(const char* line) {
+  char kind = line[0];
+  const char* p = line + 1;
+
+  if (kind == 'N' || kind == 'n') {
+    char from[sizeof(inbox[0].from)], text[sizeof(inbox[0].text)];
+    const char* bar = strchr(p, '|');
+    if (bar) {
+      size_t nf = (size_t)(bar - p);
+      if (nf >= sizeof(from)) nf = sizeof(from) - 1;
+      memcpy(from, p, nf);
+      from[nf] = 0;
+      snprintf(text, sizeof(text), "%s", bar + 1);
+    } else {
+      snprintf(from, sizeof(from), "%s", p);
+      text[0] = 0;
+    }
+    addNotification("WA", from, text);
+    return;
+  }
+
+  if (kind == 'T' || kind == 't') {
+    long long epoch = atoll(p);
+    if (epoch > 1700000000LL) {
+      struct timeval tv = { (time_t)epoch, 0 };
+      settimeofday(&tv, nullptr);
+      tzset();
+      Serial.println("[jam] diset dari PC (serial)");
+    }
+    return;
+  }
+
+  if (kind == 'W' || kind == 'w') {
+    char fld[5][32] = {{0}};
+    uint8_t n = 0;
+    const char* q = p;
+    while (n < 5) {
+      const char* bar = strchr(q, '|');
+      size_t len = bar ? (size_t)(bar - q) : strlen(q);
+      if (len >= sizeof(fld[n])) len = sizeof(fld[n]) - 1;
+      memcpy(fld[n], q, len);
+      fld[n][len] = 0;
+      n++;
+      if (!bar) break;
+      q = bar + 1;
+    }
+    if (n >= 5) {
+      float t = atof(fld[0]), rh = atof(fld[1]);
+      float feels = atof(fld[2]), wind = atof(fld[3]);
+      int code = atoi(fld[4]);
+      if (isfinite(t) && !isnan(t)) {
+        wx.temp    = t;
+        wx.rh      = rh;
+        wx.feels   = isnan(feels) ? t : feels;
+        wx.wind    = wind;
+        wx.code    = code;
+        wx.updated = millis();
+        wx.valid   = true;
+        wxFromSerial = true;
+        Serial.printf("[cuaca] dari PC: %.1fC %d%% %s\n",
+                      wx.temp, (int)wx.rh, wxText(wx.code));
+      }
+    }
+    return;
+  }
+
+  if (kind == 'G' || kind == 'g') {
+    const char* bar = strchr(p, '|');
+    if (bar) {
+      char s[32];
+      size_t len = (size_t)(bar - p);
+      if (len >= sizeof(s)) len = sizeof(s) - 1;
+      memcpy(s, p, len);
+      s[len] = 0;
+      float la = atof(s);
+      snprintf(s, sizeof(s), "%s", bar + 1);
+      float lo = atof(s);
+      if (isfinite(la) && isfinite(lo) && la >= -90.f && la <= 90.f &&
+          lo >= -180.f && lo <= 180.f) {
+        saveWxLocation(la, lo);
+        wxFromSerial = true;
+        Serial.printf("[cuaca] lokasi dari PC: %.4f,%.4f\n", la, lo);
+      }
+    }
+    return;
+  }
+}
+
 static void updateSerialInput() {
-  static char  inFrom[sizeof(inbox[0].from)];
-  static char  inText[sizeof(inbox[0].text)];
-  static uint8_t nFrom = 0, nText = 0;
-  static bool  inNotif = false, inTextMode = false;
+  static char  line[160];
+  static uint8_t n = 0;
 
   while (Serial.available()) {
     char c = (char)Serial.read();
 
-    if (!inNotif) {
-      if (c == 'N' || c == 'n') {
-        inNotif = true; inTextMode = false; nFrom = nText = 0;
-      } else if (c == 's' || c == 'S') onShortPress();
-      else if (c == 'l' || c == 'L') onLongPress();
-      continue;
-    }
+    // tombol tes via Serial Monitor (karakter tunggal, tanpa newline)
+    if (n == 0 && (c == 's' || c == 'S')) { onShortPress(); continue; }
+    if (n == 0 && (c == 'l' || c == 'L')) { onLongPress(); continue; }
 
     if (c == '\n' || c == '\r') {
-      if (nFrom || nText) {
-        inFrom[nFrom] = 0;
-        inText[nText] = 0;
-        addNotification("WA", inFrom, inText);
+      if (n) {
+        line[n] = 0;
+        handleSerialLine(line);
+        n = 0;
       }
-      inNotif = false; inTextMode = false; nFrom = nText = 0;
-    } else if (c == '|' && !inTextMode) {
-      inTextMode = true;
-    } else if (inTextMode) {
-      if (nText < sizeof(inText) - 1) inText[nText++] = c;
-    } else {
-      if (nFrom < sizeof(inFrom) - 1) inFrom[nFrom++] = c;
+      continue;
     }
+    if (n < sizeof(line) - 1) line[n++] = c;
+    else n = 0;                       // baris terlalu panjang -> buang
   }
 }
 
