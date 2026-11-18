@@ -1787,8 +1787,8 @@ a{color:#3ddc97}
 </p>
 <form onsubmit="event.preventDefault();
   fetch('/find?q='+encodeURIComponent(q.value)).then(r=>r.json()).then(d=>{
-    if(d.ok){ la2.value=d.lat; lo2.value=d.lon; $('routeErr').textContent=d.name }
-    else $('routeErr').textContent='Tempat tidak ditemukan';
+    if(d.ok){ la2.value=d.lat; lo2.value=d.lon; $('routeErr').textContent='Ditemukan: '+d.name }
+    else $('routeErr').textContent=d.msg || 'Tempat tidak ditemukan';
   })">
   <input id=q placeholder="cari tempat, misal: Monas Jakarta">
   <button>Cari tempat</button>
@@ -1953,6 +1953,55 @@ static String urlEncode(const String& s) {
     else { out += '%'; out += HEXCH[c >> 4]; out += HEXCH[c & 15]; }
   }
   return out;
+}
+
+// Cari nama tempat lewat Nominatim (gratis, tanpa API key).
+// true -> lat/lon/name terisi. false -> msg siap ditampilkan di web.
+static bool geocodePlace(const String& q, double& la, double& lo,
+                         String& name, String& msg) {
+  if (WiFi.status() != WL_CONNECTED) {
+    msg = "WiFi mati - sambungkan ESP32 ke WiFI_RUMAH";
+    return false;
+  }
+
+  // 1 = sukses, 0 = tidak ada hasil, -1/-2 = gagal, >0 = kode HTTP
+  auto fetchOne = [&](const String& query)->int {
+    WiFiClientSecure tls;
+    tls.setInsecure();
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(9000);
+    http.setUserAgent("mochi-dasai/1.0 (ESP32)");
+    String url = "https://nominatim.openstreetmap.org/search?q=" +
+                 urlEncode(query) + "&format=jsonv2&limit=1";
+    if (!http.begin(tls, url)) return -1;
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) { http.end(); return code; }
+    String payload = http.getString();
+    http.end();
+    JsonDocument doc;
+    if (deserializeJson(doc, payload)) return -2;
+    JsonArray arr = doc.as<JsonArray>();
+    if (arr.size() == 0) return 0;
+    la   = atof(arr[0]["lat"] | "0");
+    lo   = atof(arr[0]["lon"] | "0");
+    name = arr[0]["display_name"] | "";
+    return 1;
+  };
+
+  int r = fetchOne(q);
+  // Nama pendek/daerah sering miss -> ulangi dengan ", Indonesia".
+  String lower = q; lower.toLowerCase();
+  if (r == 0 && lower.indexOf("indonesia") < 0) {
+    delay(1100);                       // Nominatim: maksimal 1 request/detik
+    r = fetchOne(q + ", Indonesia");
+  }
+
+  if (r == 1) { msg = ""; return true; }
+  if (r == 0)      msg = "Tempat tidak ditemukan - coba lebih spesifik, misal \"Monas Jakarta\"";
+  else if (r < 0)  msg = "Gagal hubungi server pencarian";
+  else             msg = "Server sibuk, coba lagi beberapa saat";
+  return false;
 }
 
 static uint8_t mapManeuver(const char* type, const char* modifier) {
@@ -2168,7 +2217,9 @@ static void setupWeb() {
   // HP (iOS/Android) suka membuka halaman "login WiFi" sendiri. Semua
   // permintaan asing kita arahkan ke halaman kontrol supaya popup muncul.
   web.onNotFound([]() {
-    web.sendHeader("Location", "http://192.168.4.1/", true);
+    String host = web.hostHeader();
+    if (host.length() == 0) host = "192.168.4.1";
+    web.sendHeader("Location", "http://" + host + "/", true);
     web.send(302, "text/plain", "");
   });
 
@@ -2213,54 +2264,23 @@ static void setupWeb() {
   // Cari nama tempat -> koordinat (Nominatim, gratis, tanpa API key).
   web.on("/find", HTTP_GET, []() {
     if (!web.hasArg("q") || web.arg("q").length() == 0) {
-      web.send(200, "application/json", "{\"ok\":false}");
+      web.send(200, "application/json",
+               "{\"ok\":false,\"msg\":\"Ketik nama tempat dulu\"}");
       return;
     }
-    if (WiFi.status() != WL_CONNECTED) {
-      web.send(200, "application/json", "{\"ok\":false,\"msg\":\"WiFi mati\"}");
-      return;
-    }
-    String url = "https://nominatim.openstreetmap.org/search?q=" +
-                 urlEncode(web.arg("q")) + "&format=jsonv2&limit=1";
-
-    WiFiClientSecure tls;
-    tls.setInsecure();
-    HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(9000);
-    http.setUserAgent("mochi-dasai/1.0 (ESP32)");
-    if (!http.begin(tls, url)) {
-      web.send(200, "application/json", "{\"ok\":false}");
-      return;
-    }
-    int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-      http.end();
-      web.send(200, "application/json", "{\"ok\":false,\"msg\":\"HTTP\"}");
-      return;
-    }
-    String payload = http.getString();
-    http.end();
-
-    JsonDocument doc;
-    if (deserializeJson(doc, payload)) {
-      web.send(200, "application/json", "{\"ok\":false}");
-      return;
-    }
-    JsonArray arr = doc.as<JsonArray>();
-    if (arr.size() == 0) {
-      web.send(200, "application/json", "{\"ok\":false}");
-      return;
-    }
-    double la = atof(arr[0]["lat"] | "0");
-    double lo = atof(arr[0]["lon"] | "0");
-    const char* nm = arr[0]["display_name"] | "";
+    double la = 0, lo = 0;
+    String name, msg;
+    bool ok = geocodePlace(web.arg("q"), la, lo, name, msg);
 
     JsonDocument out;
-    out["ok"]   = true;
-    out["lat"]  = la;
-    out["lon"]  = lo;
-    out["name"] = nm;
+    out["ok"] = ok;
+    if (ok) {
+      out["lat"]  = la;
+      out["lon"]  = lo;
+      out["name"] = name;
+    } else {
+      out["msg"] = msg;
+    }
     String body;
     serializeJson(out, body);
     web.send(200, "application/json", body);
@@ -2604,24 +2624,21 @@ void setup() {
   oled.setBusClock(400000);
   oled.setContrast(180);
 
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_6x10_tf);
-  oled.drawStr(0, 22, "mochi dasai");
-  oled.drawStr(0, 36, "booting...");
-  oled.sendBuffer();
-
-  // splash: mata mochi membuka
-  for (int i = 0; i <= 8; ++i) {
-    int h = 3 + i * 2;
-    int r = (15 < h ? 15 : h) / 2;
+  // Splash: pakai frame GIF idle asli (sudah 128x64 + dither bersih),
+  // bukan kotak mata. Contrast naik pelan -> kesan menyala halus.
+  oled.setContrast(30);
+  for (int i = 0; i < 14; ++i) {
+    oled.setContrast(30 + (i * 150) / 13);
     oled.clearBuffer();
-    oled.drawRBox(40, 33 - h / 2, 15, h, r);
-    oled.drawRBox(74, 33 - h / 2, 15, h, r);
-    oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(52, 58, "mochi dasai");
+    oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H,
+                  moodFrame(MOOD_IDLE_SET, i));
     oled.sendBuffer();
-    delay(45);
+    uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[MOOD_IDLE_SET]) /
+                               MOOD_FRAME_BYTES);
+    uint16_t d = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + i]) * 10;
+    delay(d ? d : 70);
   }
+  oled.setContrast(180);
 
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 

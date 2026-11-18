@@ -459,6 +459,12 @@ Rute diambil dari **OSRM** (`router.project-osrm.org`) dan geocoding dari
 **Nominatim** — keduanya gratis tanpa API key. Titik awal rute = posisi GPS
 (atau lokasi cuaca bila GPS belum fix). Akurasi geocoding IP setingkat kota.
 
+Kalau pencarian gagal, pesan di halaman web sekarang menyebut alasan aslinya
+(`WiFi mati`, `Server sibuk`, atau `Tempat tidak ditemukan`). Query pendek
+sering miss; tambahkan nama kota, misal `Monas` → `Monas Jakarta`. ESP32 juga
+mencoba ulang otomatis dengan `, Indonesia` kalau hasil pertama kosong.
+Nominatim membatasi 1 request/detik, jadi jeda sekitar 1 detik antar pencarian.
+
 Endpoint:
 
 ```
