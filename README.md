@@ -134,13 +134,17 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
 ## 4. Cara pakai
 
-- Layar pertama = **animasi mochi** dari GIF `mi_bef.gif` yang diberikan:
-  77 frame bitmap 128x64 diputar berurutan dengan delay aslinya (60–70 ms
-  per frame, ≈15 fps). Tidak ada potongan acak atau jeda lama, jadi geraknya
-  mengalir mulus. Frame OLED ada di `include/mochi_frames.h`, GIF aslinya di
-  `include/mochi_web_gif.h`. Di web bisa dilihat/diunduh di
-  `http://192.168.1.8/mochi.gif`. Mood hanya tampil sebagai ikon + label kecil
-  di sudut kiri atas — karakter tetap utuh (tidak digambar ulang).
+- Layar pertama = **animasi idle** (`relaxed.gif`) sampai mood dipilih, lalu
+  **animasi ekspresi sesuai mood** dari folder
+  `D:\Download\example gift\example gift`:
+  Senang=`happy.gif`, Sedih=`frustrated.gif`, Marah=`angry.gif`,
+  Ngantuk=`sleepy.gif`, Lapar=`excited_2.gif`. Tiap GIF dikonversi jadi ~75
+  frame bitmap 128x64 1-bit dan diputar berurutan dengan delay aslinya
+  (60–70 ms per frame, ≈15 fps). Saat mood berubah, animasi langsung mulai
+  dari frame 0. Frame ada di `include/mood_frames.h` (~450 KB PROGMEM).
+  Label mood kecil tetap tampil di sudut kiri-bawah. GIF `mi_bef.gif` masih
+  disematkan di `include/mochi_web_gif.h` dan bisa dilihat/diunduh di
+  `http://192.168.1.8/mochi.gif`.
 - **ESP32 membuat hotspot sendiri** — tidak perlu router:
 
   | | |
@@ -283,7 +287,9 @@ Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
 - `N<pengirim>|<pesan>\n` untuk tiap pesan WhatsApp masuk,
 - `T<epoch>\n` jam dari PC (firmware yang konversi ke WIB),
 - `G<lat>|<lon>\n` lokasi cuaca,
-- `W<temp>|<rh>|<feels>|<wind>|<code>\n` cuaca dari Open-Meteo.
+- `W<temp>|<rh>|<feels>|<wind>|<code>\n` cuaca dari Open-Meteo,
+- `M<0..4>\n` ganti mood lewat kabel (0 Senang, 1 Sedih, 2 Marah, 3 Ngantuk,
+  4 Lapar) — berguna untuk uji animasi tanpa WiFi/HP.
 
 Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi
 ESP32 tidak perlu join WiFi `WiFI_RUMAH` supaya jam/cuaca/notif WA jalan. GPS tetap
@@ -379,24 +385,36 @@ Catatan:
 - Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
   tombol fisik supaya tidak perlu buka HP untuk pindah layar.
 
-### Animasi wajah (dari GIF `mi_bef.gif`)
+### Animasi wajah (idle + GIF ekspresi per mood)
 
-Animasi OLED memakai **77 frame 128x64 1-bit** yang dikonversi dari GIF
-`mi_bef.gif` (320x180, background hitam). Frame disimpan di
-`include/mochi_frames.h` sebagai PROGMEM (~79 KB). Delay tiap frame mengikuti
-GIF aslinya (60/70 ms) dan disimpan di `MOCHI_DELAYS`. GIF mentahnya juga
-disematkan di `include/mochi_web_gif.h` supaya `/mochi.gif` menampilkan
-animasi yang sama di browser.
+Layar wajah memakai **6 set frame 128x64 1-bit** yang dikonversi dari GIF
+ekspresi (480x304, background hitam) di folder
+`D:\Download\example gift\example gift`. Lima set pertama mengikuti enum
+`Mood`, set ke-6 adalah animasi idle:
 
-Field DASAI 90 frame (`include/dasai_frames.h`) tetap ada untuk diagnosa
-`/face?frame=N`, tapi tidak dipakai sebagai animasi utama.
+| Kondisi | GIF | Frame |
+|---|---|---|
+| Idle (belum ada mood dipilih) | `relaxed.gif` | 75 |
+| Senang | `happy.gif` | 75 |
+| Sedih | `frustrated.gif` | 75 |
+| Marah | `angry.gif` | 75 |
+| Ngantuk | `sleepy.gif` | 76 |
+| Lapar | `excited_2.gif` | 75 |
+
+Frame disimpan di `include/mood_frames.h` sebagai PROGMEM (~450 KB), delay
+tiap frame 60/70 ms sesuai GIF aslinya, dan pemilihannya ada di `drawFace()`
+(`src/main.cpp`). Supaya tidak "pecah", GIF diturunkan ke 128x64 memakai
+**interpolasi bicubic** sebelum threshold — nearest-neighbor menghasilkan
+bintik dithering acak. `mi_bef.gif` tetap disematkan di
+`include/mochi_web_gif.h` untuk `/mochi.gif` di browser. Field DASAI 90 frame
+(`include/dasai_frames.h`) tetap ada untuk diagnosa `/face?frame=N`.
 
 | Mau ubah | Di mana |
 |---|---|
-| ganti GIF animasi | taruh GIF baru, lalu jalankan `powershell -File tools\make_mochi_frames.ps1 -Gif <path>` |
-| crop / threshold | parameter `-CropX -CropY -CropW -CropH -Threshold` di script tersebut |
-| kecepatan animasi | `MOCHI_DELAYS` di `include/mochi_frames.h` (dalam ms) |
-| mood / ekspresi kecil | `drawMoodBadge()` di `src/main.cpp` |
+| ganti GIF mood/idle | edit daftar `$gifs` di `tools/make_mood_frames.ps1`, lalu jalankan `powershell -File tools\make_mood_frames.ps1` |
+| crop / threshold | parameter `-CropX -CropY -CropW -CropH -Threshold` di script tersebut (default crop 24,24,432,216 — rasio 2:1) |
+| kecepatan animasi | `MOOD_DELAYS` di `include/mood_frames.h` (dalam unit 10 ms) |
+| label mood kecil | `drawMoodBadge()` di `src/main.cpp` |
 
 ### Navigasi otomatis (turn-by-turn)
 

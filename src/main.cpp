@@ -30,7 +30,7 @@
 
 #include "../include/config.h"
 #include "../include/dasai_frames.h"   // 90 frame animasi DASAI asli (PROGMEM)
-#include "../include/mochi_frames.h"   // 77 frame dari GIF mi_bef (animasi OLED)
+#include "../include/mood_frames.h"    // 5 set frame dari GIF ekspresi (animasi OLED per mood)
 #include "../include/mochi_web_gif.h"  // GIF asli untuk endpoint /mochi.gif
 
 // ------------------------------------------------------------ objek global
@@ -74,6 +74,7 @@ static const char* moodName(Mood m) {
 }
 
 static Mood  mood        = Mood::Happy;
+static bool  moodIdle    = true;   // true = animasi idle (relaxed.gif), belum ada mood dipilih
 static React react       = React::None;
 static uint32_t reactUntil = 0;   // millis() akhir animasi reaksi
 static uint32_t faceHintUntil = 0;// millis() akhir petunjuk "tahan = menu"
@@ -274,6 +275,7 @@ static void openMenu() {
 
 static void setMood(Mood next) {
   mood = next;
+  moodIdle = false;               // mood dipilih -> hentikan animasi idle
   nvsSet("mood", (uint32_t)next);
   if (next != Mood::Angry) angryPets = 0;
   Serial.printf("[mood] %s\n", moodName(next));
@@ -910,8 +912,9 @@ static void drawMoodBadge(uint32_t now) {
   oled.drawStr(10, 63, label);
 }
 static void drawFace() {
-  // Animasi dari GIF mi_bef: 77 frame, delay aslinya 60/70 ms, diputar urut.
-  // Frame dikonversi ke 128x64 1-bit (tools/make_mochi_frames.ps1).
+  // Animasi mengikuti mood: 5 GIF ekspresi, masing-masing ~75 frame dengan
+  // delay aslinya 60/70 ms. Urutan set = enum Mood (lihat mood_frames.h).
+  static uint8_t  whichNow = 0xFF;   // set frame yang sedang diputar
   static uint16_t frame = 0;
   static uint32_t last  = 0;
   uint32_t now = millis();
@@ -925,15 +928,29 @@ static void drawFace() {
     return;
   }
 
-  uint16_t delay = pgm_read_word(&MOCHI_DELAYS[frame]);
+  // Idle = relaxed.gif sampai mood dipilih; setelah itu animasi mood-nya.
+  uint8_t which = moodIdle ? MOOD_IDLE_SET : (uint8_t)mood;
+  if (which >= MOOD_GIF_COUNT) which = 0;
+  if (which != whichNow) {              // ganti ekspresi -> mulai dari frame 0
+    whichNow = which;
+    frame = 0;
+    last  = now;
+  }
+
+  uint16_t cnt  = pgm_read_word(&MOOD_FRAME_COUNTS[which]);
+  uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[which]) /
+                             MOOD_FRAME_BYTES);
+  uint16_t delay = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + frame]) * 10;
+  if (delay == 0) delay = 70;
+
   if (now - last >= delay) {
     uint32_t steps = (now - last) / delay;
     if (steps > 8) steps = 8;                   // kejar waktu setelah jeda panjang
     last = now;
-    frame = (frame + steps) % MOCHI_FRAME_COUNT;
+    frame = (frame + steps) % cnt;
   }
 
-  oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(frame));
+  oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(which, frame));
   drawMoodBadge(now);
 }
 
@@ -1427,6 +1444,7 @@ static void updateButton() {
 //   T<epoch UTC>\n                    jam dari PC
 //   W<temp>|<rh>|<feels>|<wind>|<code>\n  cuaca dari PC
 //   G<lat>|<lon>\n                    lokasi cuaca dari PC
+//   M<0..4>\n                         ganti mood (0 Senang ... 4 Lapar)
 static void handleSerialLine(const char* line) {
   char kind = line[0];
   const char* p = line + 1;
@@ -1455,6 +1473,16 @@ static void handleSerialLine(const char* line) {
       settimeofday(&tv, nullptr);
       tzset();
       Serial.println("[jam] diset dari PC (serial)");
+    }
+    return;
+  }
+
+  if (kind == 'M' || kind == 'm') {
+    int v = atoi(p);
+    if (v >= 0 && v < (int)Mood::Count) {
+      setMood((Mood)v);
+      react = React::None;
+      goFace();
     }
     return;
   }
