@@ -25,6 +25,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <esp_system.h>        // esp_random() untuk ekspresi acak
+#include <driver/gpio.h>       // gpio_set_drive_capability() untuk buzzer
 #include <math.h>
 #include <string.h>
 
@@ -243,6 +244,15 @@ static void beep() {
   buzzOn(2600);
   delay(70);
   buzzOff();
+}
+
+// /buzz non-blocking: pin tetap HIGH sampai task matikan di loop().
+static uint32_t webBuzzOffAt = 0;
+static void webBuzzTask() {
+  if (webBuzzOffAt && (int32_t)(millis() - webBuzzOffAt) >= 0) {
+    webBuzzOffAt = 0;
+    buzzOff();
+  }
 }
 
 // Notifikasi: dua pulse supaya beda dari bunyi tombol/mood.
@@ -2497,10 +2507,9 @@ static void setupWeb() {
     }
     int ms = web.hasArg("ms") ? web.arg("ms").toInt() : 400;
     if (ms < 50) ms = 50;
-    if (ms > 3000) ms = 3000;
+    if (ms > 10000) ms = 10000;
     buzzOn(2000);
-    delay(ms);
-    buzzOff();
+    webBuzzOffAt = millis() + ms;
     web.send(200, "application/json", "{\"ok\":true,\"ms\":" + String(ms) + "}");
   });
 
@@ -2568,6 +2577,7 @@ static void setupWeb() {
     doc["ip"]       = WiFi.localIP().toString();
     doc["rssi"]     = WiFi.RSSI();
     doc["heap"]     = ESP.getFreeHeap();
+    doc["buzz"]     = BUZZER_ACTIVE ? digitalRead(BUZZ_PINS_ALL[0]) : -1;
     doc["screen"]   = SCREEN_NAME[screen];
     doc["mood"]     = moodName(mood);
     {
@@ -2691,6 +2701,8 @@ void setup() {
     for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) {
       pinMode(BUZZ_PINS_ALL[i], OUTPUT);
       digitalWrite(BUZZ_PINS_ALL[i], LOW);
+      // Naikkan drive strength: default ~20mA sering kurang untuk buzzer aktif.
+      gpio_set_drive_capability((gpio_num_t)BUZZ_PINS_ALL[i], GPIO_DRIVE_CAP_3);
     }
   }
 
@@ -2785,6 +2797,7 @@ void loop() {
   navTask();
   updateButton();
   notifyBeepTask();
+  webBuzzTask();
   updateSerialInput();
   wifiTask();
   mqttTask();
