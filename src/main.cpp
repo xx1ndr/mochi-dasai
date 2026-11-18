@@ -31,6 +31,7 @@
 
 #include "../include/config.h"
 #include "../include/dasai_frames.h"   // 90 frame animasi DASAI asli (PROGMEM)
+#include "../include/mochi_frames.h"   // 77 frame dari mi_bef.gif (splash awal)
 #include "../include/mood_frames.h"    // 5 set frame dari GIF ekspresi (animasi OLED per mood)
 #include "../include/mochi_web_gif.h"  // GIF asli untuk endpoint /mochi.gif
 
@@ -2716,16 +2717,15 @@ void setup() {
   oled.setBusClock(400000);
   oled.setContrast(180);
 
-  // Splash restart: animasi mochi DASAI asli (90 frame, sebelum GIF gift).
-  // Full contrast sejak awal -- tidak ada efek redup/kedip.
+  // Splash restart: animasi mochi dari mi_bef.gif (77 frame) -- yang dibuat
+  // sebelum kamu kirim GIF gift. Full contrast, tanpa efek redup/kedip.
   for (int i = 0; i < 24; ++i) {
     oled.clearBuffer();
-    oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
-                  dasaiFrame((uint8_t)(FACE_LOOP_FIRST + i)));
+    oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(i));
     oled.sendBuffer();
     delay(60);
   }
-  faceStartFrame = FACE_LOOP_FIRST + 24; // lanjut tanpa loncat ke frame 0
+  faceStartFrame = 0;                   // lanjut ke idle normal dari frame 0
 
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 
