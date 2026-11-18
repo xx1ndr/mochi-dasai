@@ -30,10 +30,8 @@
 #include <string.h>
 
 #include "../include/config.h"
-#include "../include/dasai_frames.h"   // 90 frame animasi DASAI asli (PROGMEM)
-#include "../include/mochi_frames.h"   // 77 frame dari mi_bef.gif (splash awal)
-#include "../include/mood_frames.h"    // 5 set frame dari GIF ekspresi (animasi OLED per mood)
-#include "../include/mochi_web_gif.h"  // GIF asli untuk endpoint /mochi.gif
+#include "../include/mochi_frames.h"   // 77 frame dari mi_bef.gif (satu-satunya animasi)
+#include "../include/mochi_web_gif.h"  // mi_bef.gif untuk endpoint /mochi.gif
 
 // ------------------------------------------------------------ objek global
 // clock/data ikut diberikan supaya U8g2 memakai pin I2C dari config.h
@@ -76,7 +74,7 @@ static const char* moodName(Mood m) {
 }
 
 static Mood  mood        = Mood::Happy;
-static bool  moodIdle    = true;   // true = animasi idle (relaxed.gif), belum ada mood dipilih
+static bool  moodIdle    = true;   // selalu mi_bef.gif; mood hanya label/data
 static React react       = React::None;
 static uint32_t reactUntil = 0;   // millis() akhir animasi reaksi
 static uint32_t faceHintUntil = 0;// millis() akhir petunjuk "tahan = menu"
@@ -941,23 +939,14 @@ static void drawStatusBar() {
 }
 
 // ------------------------------------------------------------ wajah mochi
-// Animasi ASLI mochi dasai: 90 frame bitmap 128x64 dari klip RIVE resmi,
-// diekspor ke include/dasai_frames.h (sumber: github.com/upiir/esp32s3_oled_dasai_mochi).
-//
-// Frame 0-12 itu fade in dan frame 59-89 fade out, jadi yang diputar hanya
-// 13..58. Potongan acak dari rentang ini + jeda acak dipakai supaya perilakunya
-// mirip web The Mochi: ekspresi berubah-ubah, ada delay antar ekspresi.
-// Frame asli tidak diubah satu bit pun.
-#define FACE_LOOP_FIRST 13
-#define FACE_LOOP_LAST  58
+// Satu-satunya animasi: mi_bef.gif, 77 frame bitmap 128x64 1-bit dari
+// include/mochi_frames.h. Semua GIF lama (DASAI, mood, sleepy) sudah dihapus.
 
 static int16_t  faceFrozen = -1;   // >= 0 = tampilkan 1 frame saja (diagnosa /face)
 
 // ---- transisi halus antar wajah ----
-// Frame DASAI tidak diubah satu bit pun. Yang diperbaiki: kecepatan ping-pong
-// (ease in/out) dan crossfade saat pindah ke/dari wajah mood.
 #define FACE_BLEND_MS 180
-static uint8_t facePrevBuf[DASAI_FRAME_BYTES];  // snapshot frame sebelumnya (1024 byte)
+static uint8_t facePrevBuf[MOCHI_FRAME_BYTES];  // snapshot frame sebelumnya (1024 byte)
 static uint32_t faceBlendUntil = 0;
 
 static uint8_t faceModeNow() {
@@ -979,12 +968,12 @@ static void blendFromPrev(uint32_t now) {
   uint8_t* buf = oled.getBufferPtr();
   if (!buf) return;
 
-  for (int y = 0; y < DASAI_FRAME_H; ++y) {
-    for (int x = 0; x < DASAI_FRAME_W; ++x) {
+  for (int y = 0; y < MOCHI_FRAME_H; ++y) {
+    for (int x = 0; x < MOCHI_FRAME_W; ++x) {
       int th = kBayer[(y & 3) * 4 + (x & 3)] * 17;  // 0..255
       if (th <= progress) continue;                 // pakai pixel baru
       // framebuffer u8g2 = vertikal, LSB di atas: byte = baris 8 px, bit = y%8
-      int idx = (y & ~7) * (DASAI_FRAME_W / 8) + x;
+      int idx = (y & ~7) * (MOCHI_FRAME_W / 8) + x;
       uint8_t mask = (uint8_t)(1u << (y & 7));
       if (facePrevBuf[idx] & mask) buf[idx] |= mask;
       else                         buf[idx] &= (uint8_t)~mask;
@@ -1037,8 +1026,7 @@ static void drawMoodBadge(uint32_t now) {
   oled.drawStr(10, 63, label);
 }
 static void drawFace() {
-  // Idle = mi_bef.gif (animasi sebelum gift). Mood = 5 GIF ekspresi.
-  static uint8_t  whichNow = 0xFF;   // 0xFF = idle mi_bef, selain itu = mood
+  // Satu-satunya animasi: mi_bef.gif. Mood hanya label/status, bukan GIF.
   static uint16_t frame = 0;
   static uint32_t last  = 0;
   uint32_t now = millis();
@@ -1047,45 +1035,30 @@ static void drawFace() {
   if (react != React::None && now >= reactUntil) react = React::None;
 
   if (faceFrozen >= 0) {
-    oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
-                  dasaiFrame((uint8_t)faceFrozen));
+    int16_t n = faceFrozen;
+    if (n >= MOCHI_FRAME_COUNT) n = MOCHI_FRAME_COUNT - 1;
+    oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame((uint16_t)n));
     return;
   }
 
-  uint8_t which = moodIdle ? 0xFF : (uint8_t)mood;
-  bool isMochi = (which == 0xFF);
-  if (which >= MOOD_GIF_COUNT && !isMochi) which = 0;
-  if (which != whichNow) {              // ganti ekspresi -> mulai dari frame 0
-    whichNow = which;
-    frame = faceStartFrame;             // 0 normal, atau lanjutan setelah splash
+  if (faceStartFrame) {                 // lanjut dari splash tanpa loncat
+    frame = faceStartFrame;
     faceStartFrame = 0;
-    last  = now;
+    last = now;
   }
+  if (frame >= MOCHI_FRAME_COUNT) frame = 0;
 
-  uint16_t cnt;
-  uint16_t delay;
-  if (isMochi) {
-    cnt   = MOCHI_FRAME_COUNT;
-    delay = (uint16_t)pgm_read_word(&MOCHI_DELAYS[frame]);
-  } else {
-    cnt  = pgm_read_word(&MOOD_FRAME_COUNTS[which]);
-    uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[which]) /
-                               MOOD_FRAME_BYTES);
-    delay = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + frame]) * 10;
-  }
+  uint16_t delay = (uint16_t)pgm_read_word(&MOCHI_DELAYS[frame]);
   if (delay == 0) delay = 70;
 
   if (now - last >= delay) {
     uint32_t steps = (now - last) / delay;
     if (steps > 8) steps = 8;                   // kejar waktu setelah jeda panjang
     last = now;
-    frame = (frame + steps) % cnt;
+    frame = (frame + steps) % MOCHI_FRAME_COUNT;
   }
 
-  if (isMochi)
-    oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(frame));
-  else
-    oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(which, frame));
+  oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(frame));
   drawMoodBadge(now);
 }
 
@@ -1518,7 +1491,7 @@ static void render() {
 
   // Simpan isi buffer terakhir SEBELUM clear, dipakai crossfade wajah.
   uint8_t* buf = oled.getBufferPtr();
-  if (buf) memcpy(facePrevBuf, buf, DASAI_FRAME_BYTES);
+  if (buf) memcpy(facePrevBuf, buf, MOCHI_FRAME_BYTES);
 
   uint8_t mode = (screen == SCR_FACE || screen == SCR_EAT) ? faceModeNow() : 255;
   static uint8_t prevMode = 255;
@@ -1812,10 +1785,10 @@ button{background:#3ddc97;color:#0b0b0b;border:0;font-weight:700}
 button.alt{background:#1c1c1c;color:#eee;border:1px solid #3a3a3a;font-weight:600}
 a{color:#3ddc97}
 </style>
-<img src="/mochi.gif?v=2" alt="animasi mochi dasai" width=256
+<img src="/mochi.gif?v=3" alt="animasi mochi dasai" width=256
      style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
 <p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
-  animasi mochi &middot; sleepy.gif &middot; <a href="/mochi.gif">buka GIF</a>
+  animasi mochi &middot; mi_bef.gif &middot; <a href="/mochi.gif">buka GIF</a>
 </p>
 <h3>layar <span id=now>-</span></h3>
 <button id=next>Layar berikutnya</button>
@@ -2594,7 +2567,7 @@ static void setupWeb() {
     } else if (web.hasArg("frame")) {
       int n = web.arg("frame").toInt();
       if (n < 0) n = 0;
-      if (n >= DASAI_FRAME_COUNT) n = DASAI_FRAME_COUNT - 1;
+      if (n >= MOCHI_FRAME_COUNT) n = MOCHI_FRAME_COUNT - 1;
       faceFrozen = n;
       screen = SCR_FACE;
     }
@@ -2878,8 +2851,8 @@ void setup() {
     uint32_t t0 = micros();
     for (int i = 0; i < 8; ++i) {
       oled.clearBuffer();
-      oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
-                    dasaiFrame((uint8_t)(FACE_LOOP_FIRST + i)));
+      oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H,
+                    mochiFrame((uint16_t)i));
       oled.sendBuffer();
     }
     Serial.printf("[oled] 1 frame 128x64 = %lu ms -> maksimal %lu fps\n",

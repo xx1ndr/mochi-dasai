@@ -150,17 +150,10 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
 ## 4. Cara pakai
 
-- Layar pertama = **animasi idle** (`relaxed.gif`) sampai mood dipilih, lalu
-  **animasi ekspresi sesuai mood** dari folder
-  `D:\Download\example gift\example gift`:
-  Senang=`happy_2.gif`, Sedih=`love.gif`, Marah=`angry.gif`,
-  Ngantuk=`sleepy.gif`, Lapar=`excited_2.gif`. Tiap GIF dikonversi jadi ~75
-  frame bitmap 128x64 1-bit dan diputar berurutan dengan delay aslinya
-  (60–70 ms per frame, ≈15 fps). Saat mood berubah, animasi langsung mulai
-  dari frame 0. Frame ada di `include/mood_frames.h` (~450 KB PROGMEM).
-  Label mood kecil tetap tampil di sudut kiri-bawah. GIF `mi_bef.gif` masih
-  disematkan di `include/mochi_web_gif.h` dan bisa dilihat/diunduh di
-  `http://192.168.1.8/mochi.gif`.
+- Layar pertama = **animasi `mi_bef.gif`** (77 frame, 128x64 1-bit, 60–70 ms
+  per frame, ≈15 fps). Animasi ini diputar terus, kapan pun, tidak berubah saat
+  mood dipilih. Mood tetap tersimpan dan tampil sebagai label kecil di sudut
+  kiri-bawah. GIF aslinya bisa dilihat/diunduh di `http://192.168.1.8/mochi.gif`.
 - **ESP32 membuat hotspot sendiri** — tidak perlu router:
 
   | | |
@@ -423,36 +416,25 @@ Catatan:
 - Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
   tombol fisik supaya tidak perlu buka HP untuk pindah layar.
 
-### Animasi wajah (idle + GIF ekspresi per mood)
+### Animasi wajah (mi_bef.gif saja)
 
-Layar wajah memakai **6 set frame 128x64 1-bit** yang dikonversi dari GIF
-ekspresi (480x304, background hitam) di folder
-`D:\Download\example gift\example gift`. Lima set pertama mengikuti enum
-`Mood`, set ke-6 adalah animasi idle:
+Layar wajah memakai **satu-satunya animasi**: `mi_bef.gif`, 77 frame bitmap
+128x64 1-bit di `include/mochi_frames.h` (PROGMEM). Diputar looping di
+`drawFace()` (`src/main.cpp`) dengan delay asli 60/70 ms per frame. Splash
+restart dan diagnosa `/face?frame=N` juga memakai frame ini.
 
-| Kondisi | GIF | Frame |
-|---|---|---|
-| Idle (belum ada mood dipilih) | `relaxed.gif` | 75 |
-| Senang | `happy_2.gif` | 75 |
-| Sedih | `love.gif` | 75 |
-| Marah | `angry.gif` | 75 |
-| Ngantuk | `sleepy.gif` | 76 |
-| Lapar | `excited_2.gif` | 75 |
+File animasi lama sudah dihapus dari project: `dasai_frames.h` (DASAI asli 90
+frame), `mood_frames.h` (relaxed/happy/sedih/angry/sleepy/excited),
+`mochi_gif.h`, dan `tools/make_mood_frames.ps1`. Mood tetap bisa dipilih dan
+disimpan, tapi hanya memengaruhi label/status — tidak mengganti animasi.
 
-Frame disimpan di `include/mood_frames.h` sebagai PROGMEM (~450 KB), delay
-tiap frame 60/70 ms sesuai GIF aslinya, dan pemilihannya ada di `drawFace()`
-(`src/main.cpp`). Supaya tidak "pecah", GIF diturunkan ke 128x64 memakai
-**interpolasi bicubic + threshold 280** — nearest-neighbor menghasilkan
-bintik dithering acak, dan threshold 120 membuat area berwarna gelap jadi
-bongkahan putih. `mi_bef.gif` tetap disematkan di
-`include/mochi_web_gif.h` untuk `/mochi.gif` di browser. Field DASAI 90 frame
-(`include/dasai_frames.h`) tetap ada untuk diagnosa `/face?frame=N`.
+`include/mochi_web_gif.h` berisi `mi_bef.gif` untuk endpoint `/mochi.gif`.
 
 | Mau ubah | Di mana |
 |---|---|
-| ganti GIF mood/idle | edit daftar `$gifs` di `tools/make_mood_frames.ps1`, lalu jalankan `powershell -File tools\make_mood_frames.ps1` |
-| crop / threshold | parameter `-CropX -CropY -CropW -CropH -Threshold` di script tersebut (default crop 24,24,432,216 — rasio 2:1) |
-| kecepatan animasi | `MOOD_DELAYS` di `include/mood_frames.h` (dalam unit 10 ms) |
+| ganti animasi | `powershell -File tools\make_mochi_frames.ps1 -Gif <file.gif>` |
+| crop / threshold | parameter `-CropX -CropY -CropW -CropH -Threshold` di script tersebut |
+| kecepatan animasi | `MOCHI_DELAYS` di `include/mochi_frames.h` (dalam ms) |
 | label mood kecil | `drawMoodBadge()` di `src/main.cpp` |
 
 ### Navigasi otomatis (turn-by-turn)
