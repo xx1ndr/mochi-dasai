@@ -137,7 +137,7 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 - Layar pertama = **animasi idle** (`relaxed.gif`) sampai mood dipilih, lalu
   **animasi ekspresi sesuai mood** dari folder
   `D:\Download\example gift\example gift`:
-  Senang=`happy.gif`, Sedih=`frustrated.gif`, Marah=`angry.gif`,
+  Senang=`happy_2.gif`, Sedih=`love.gif`, Marah=`angry.gif`,
   Ngantuk=`sleepy.gif`, Lapar=`excited_2.gif`. Tiap GIF dikonversi jadi ~75
   frame bitmap 128x64 1-bit dan diputar berurutan dengan delay aslinya
   (60–70 ms per frame, ≈15 fps). Saat mood berubah, animasi langsung mulai
@@ -395,8 +395,8 @@ ekspresi (480x304, background hitam) di folder
 | Kondisi | GIF | Frame |
 |---|---|---|
 | Idle (belum ada mood dipilih) | `relaxed.gif` | 75 |
-| Senang | `happy.gif` | 75 |
-| Sedih | `frustrated.gif` | 75 |
+| Senang | `happy_2.gif` | 75 |
+| Sedih | `love.gif` | 75 |
 | Marah | `angry.gif` | 75 |
 | Ngantuk | `sleepy.gif` | 76 |
 | Lapar | `excited_2.gif` | 75 |
@@ -404,8 +404,9 @@ ekspresi (480x304, background hitam) di folder
 Frame disimpan di `include/mood_frames.h` sebagai PROGMEM (~450 KB), delay
 tiap frame 60/70 ms sesuai GIF aslinya, dan pemilihannya ada di `drawFace()`
 (`src/main.cpp`). Supaya tidak "pecah", GIF diturunkan ke 128x64 memakai
-**interpolasi bicubic** sebelum threshold — nearest-neighbor menghasilkan
-bintik dithering acak. `mi_bef.gif` tetap disematkan di
+**interpolasi bicubic + threshold 280** — nearest-neighbor menghasilkan
+bintik dithering acak, dan threshold 120 membuat area berwarna gelap jadi
+bongkahan putih. `mi_bef.gif` tetap disematkan di
 `include/mochi_web_gif.h` untuk `/mochi.gif` di browser. Field DASAI 90 frame
 (`include/dasai_frames.h`) tetap ada untuk diagnosa `/face?frame=N`.
 

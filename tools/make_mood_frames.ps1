@@ -6,15 +6,15 @@ param(
   [string]$Out   = 'include\mood_frames.h',
   [int]$CropX    = 24, [int]$CropY = 24,
   [int]$CropW    = 432, [int]$CropH = 216,   # rasio 2:1 = OLED 128x64
-  [int]$Threshold = 120
+  [int]$Threshold = 280   # GIF berwarna: 120 membuat hampir semua area jadi putih
 )
 
 Add-Type -AssemblyName System.Drawing
 
 # (nama file, jumlah frame, keterangan) -- urutan HARUS sama dengan enum Mood.
 $gifs = @(
-  'happy.gif',        # Senang
-  'frustrated.gif',   # Sedih
+  'happy_2.gif',      # Senang
+  'love.gif',         # Sedih
   'angry.gif',        # Marah
   'sleepy.gif',       # Ngantuk
   'excited_2.gif',    # Lapar
