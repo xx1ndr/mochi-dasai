@@ -90,6 +90,9 @@ static bool     fedOffline= false;// sudah makan tapi jam belum siap
 static bool     hungerAnnounced = false;
 static Preferences prefs;         // NVS: mood + waktu makan bertahan saat reboot
 
+// Frame lanjutan setelah splash boot, biar animasi tidak loncat ke frame 0.
+static uint16_t faceStartFrame = 0;
+
 static const uint8_t INBOX_MAX = 8;
 
 struct Note {
@@ -989,7 +992,8 @@ static void drawFace() {
   if (which >= MOOD_GIF_COUNT) which = 0;
   if (which != whichNow) {              // ganti ekspresi -> mulai dari frame 0
     whichNow = which;
-    frame = 0;
+    frame = faceStartFrame;             // 0 normal, atau lanjutan setelah splash
+    faceStartFrame = 0;
     last  = now;
   }
 
@@ -2639,6 +2643,7 @@ void setup() {
     delay(d ? d : 70);
   }
   oled.setContrast(180);
+  faceStartFrame = 14;                  // lanjutkan dari frame splash, bukan ulang
 
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 
