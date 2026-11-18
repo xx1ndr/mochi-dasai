@@ -832,9 +832,7 @@ static uint32_t faceBlendUntil = 0;
 
 static uint8_t faceModeNow() {
   if (faceFrozen >= 0) return 3;                     // frame diagnosa
-  if (screen == SCR_EAT) return 2;                   // wajah "Nyam"
-  if (mood != Mood::Happy || react != React::None) return 1; // wajah mood
-  return 0;                                          // animasi DASAI
+  return 0;                                          // selalu animasi DASAI
 }
 
 // Crossfade 1-bit memakai pola Bayer 4x4 supaya tidak ada garis-garis.
@@ -863,178 +861,45 @@ static void blendFromPrev(uint32_t now) {
   }
 }
 
-// ---- wajah mood (digambar sendiri, bukan bitmap DASAI) ----
-// Dipakai saat mood bukan Senang, saat sedang makan, atau saat ada reaksi
-// elus/marah. Gambar langsung ke buffer oled (render() yang clear & send).
-// r = 2 untuk mata hati, r = 3..4 untuk hati mengambang.
+// ---- ekspresi mood: ikon kecil di kiri atas, karakter DASAI tetap utuh ----
 static void moodHeart(int x, int y, int r) {
   oled.drawDisc(x - r, y, r);
   oled.drawDisc(x + r, y, r);
-  oled.drawTriangle(x - 2 * r, y + r / 2, x + 2 * r, y + r / 2,
-                    x, y + 2 * r + r / 2);
+  oled.drawTriangle(x - 2 * r, y, x + 2 * r, y, x, y + 3 * r);
 }
 
-static void drawMoodFace(uint32_t now) {
+static void drawMoodBadge(uint32_t now) {
   bool eating = (screen == SCR_EAT);
   bool hearts = (react == React::Love && now < reactUntil && !eating);
   bool shake  = (react == React::Shake && now < reactUntil);
+  if (mood == Mood::Happy && !eating && !hearts && !shake) return;
+
+  const char* label = moodName(mood);
+  if (eating)      label = "Nyam";
+  else if (hearts) label = "Elus";
+  else if (shake)  label = "Hmph";
 
   oled.setDrawColor(1);
   oled.setFont(u8g2_font_5x7_tf);
 
-  const char* caption = moodName(mood);
-  if (eating)    caption = "Nyam";
-  else if (hearts) caption = "Elus";
-  else if (shake)  caption = "Hmph";
-  oled.drawStr(0, 8, caption);
-
-  int right = 127;
-  if (unreadCount) {
-    char badge[4];
-    snprintf(badge, sizeof(badge), "%u", unreadCount > 9 ? 9 : unreadCount);
-    int bw = oled.getStrWidth(badge);
-    oled.drawStr(128 - bw, 8, badge);
-    right = 128 - bw - 3;
-    oled.drawCircle(right - 2, 5, 3);
-    right -= 10;
-  }
-  struct tm t;
-  if (localNow(&t)) {
-    char hm[8];
-    snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
-    int tw = oled.getStrWidth(hm);
-    int x = right - tw;
-    if (x < 40) x = 40;
-    oled.drawStr(x, 8, hm);
-  }
-
-  // gerak halus: napas pelan, marah cuma getar 1 px (jangan berkedip liar)
-  int sh = 0;
-  if (shake || mood == Mood::Angry) sh = ((now / 110) % 2) ? -1 : 1;
-  int bob = 0;
-  if (mood != Mood::Sleepy && mood != Mood::Angry) {
-    static const int8_t kBob[] = {0, 1, 1, 0, -1, -1};
-    bob = kBob[(now / 260) % 6];
-  }
-  int cx = 64 + sh;
-  int cy = 36 + bob;
-
-  // telinga + kaki digambar lebih dulu supaya menyatu dengan badan
-  oled.setDrawColor(1);
-  oled.drawDisc(cx - 15, cy - 11, 6);
-  oled.drawDisc(cx + 15, cy - 11, 6);
-  oled.drawFilledEllipse(cx - 11, cy + 15, 6, 3, U8G2_DRAW_ALL);
-  oled.drawFilledEllipse(cx + 11, cy + 15, 6, 3, U8G2_DRAW_ALL);
-  oled.drawFilledEllipse(cx, cy, 23, 15, U8G2_DRAW_ALL);
-
-  // mata
-  int ey = cy - 4, lx = cx - 9, rx = cx + 9;
-  bool blink = (now % 4200) < 130;
-  oled.setDrawColor(0);
+  int ix = 3, iy = 3;
   if (hearts) {
-    moodHeart(lx, ey, 2);
-    moodHeart(rx, ey, 2);
+    moodHeart(ix, iy, 1);
+  } else if (mood == Mood::Sad) {
+    oled.drawTriangle(ix, iy - 3, ix - 2, iy, ix + 2, iy);
+    oled.drawDisc(ix, iy, 1);
+  } else if (mood == Mood::Angry || shake) {
+    oled.drawLine(ix - 3, iy - 3, ix + 3, iy + 3);
+    oled.drawLine(ix + 3, iy - 3, ix - 3, iy + 3);
   } else if (mood == Mood::Sleepy) {
-    oled.drawEllipse(lx, ey + 2, 5, 3, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
-    oled.drawEllipse(rx, ey + 2, 5, 3, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
-  } else if (blink || (eating && ((now / 200) % 2) == 0)) {
-    oled.drawHLine(lx - 4, ey, 9);
-    oled.drawHLine(rx - 4, ey, 9);
+    oled.drawStr(0, iy + 4, "z");
   } else {
-    oled.drawFilledEllipse(lx, ey, 3, 4, U8G2_DRAW_ALL);
-    oled.drawFilledEllipse(rx, ey, 3, 4, U8G2_DRAW_ALL);
-    oled.setDrawColor(1);
-    oled.drawDisc(lx - 1, ey - 2, 1);
-    oled.drawDisc(rx - 1, ey - 2, 1);
-    oled.setDrawColor(0);
-    if (mood == Mood::Angry) {
-      oled.drawLine(lx - 5, ey - 8, lx + 4, ey - 5);
-      oled.drawLine(rx + 5, ey - 8, rx - 4, ey - 5);
-    } else if (mood == Mood::Sad) {
-      oled.drawLine(lx - 5, ey - 7, lx + 4, ey - 9);
-      oled.drawLine(rx + 5, ey - 7, rx - 4, ey - 9);
-    }
+    // lapar / makan: mangkuk kecil
+    oled.drawBox(ix - 3, iy + 1, 6, 2);
+    oled.drawBox(ix - 2, iy - 1, 4, 1);
   }
-
-  // mulut
-  int my = cy + 7;
-  oled.setDrawColor(0);
-  if (eating) {
-    if (((now / 220) % 2) == 0) {
-      oled.drawFilledEllipse(cx, my, 5, 3, U8G2_DRAW_ALL);
-      oled.setDrawColor(1);
-      oled.drawBox(cx - 2, my - 1, 4, 1);
-      oled.setDrawColor(0);
-    } else {
-      oled.drawEllipse(cx, my, 5, 2, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
-    }
-  } else {
-    switch (mood) {
-      case Mood::Sad:
-        oled.drawEllipse(cx, my + 4, 5, 3, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_UPPER_RIGHT);
-        break;
-      case Mood::Angry:
-        oled.drawHLine(cx - 4, my + 1, 9);
-        oled.drawLine(cx - 4, my + 1, cx - 6, my + 3);
-        oled.drawLine(cx + 4, my + 1, cx + 6, my + 3);
-        break;
-      case Mood::Sleepy:
-        oled.drawDisc(cx, my + 1, 2);
-        break;
-      case Mood::Hungry:
-        oled.drawFilledEllipse(cx, my + 1, 3, 2, U8G2_DRAW_ALL);
-        oled.drawLine(cx + 4, my, cx + 6, my + 2);
-        oled.drawDisc(cx + 6, my + 3, 1);
-        break;
-      default:
-        oled.drawEllipse(cx, my - 1, 5, 3, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
-        break;
-    }
-  }
-
-  // pipi
-  if (mood == Mood::Happy || hearts || eating) {
-    oled.setDrawColor(0);
-    oled.drawFilledEllipse(cx - 17, my - 2, 3, 2, U8G2_DRAW_ALL);
-    oled.drawFilledEllipse(cx + 17, my - 2, 3, 2, U8G2_DRAW_ALL);
-  }
-
-  // aksesoris: air mata di pipi, "z" naik pelan, tanda marah, hati melayang
-  if (mood == Mood::Sad && !hearts) {
-    int ph = (now / 170) % 12;
-    int ty = ey + 6 + ph;
-    oled.setDrawColor(0);
-    oled.drawTriangle(lx - 2, ty - 3, lx - 4, ty, lx, ty);
-    oled.drawDisc(lx - 2, ty, 1);
-  }
-  if (mood == Mood::Sleepy) {
-    oled.setDrawColor(1);
-    oled.setFont(u8g2_font_5x7_tf);
-    int ph = (now / 450) % 12;
-    oled.drawStr(cx + 24, cy - 6 - ph, "z");
-    oled.drawStr(cx + 31, cy - 12 - ph, "Z");
-  }
-  if (mood == Mood::Angry) {
-    oled.setDrawColor(1);
-    int ax = cx + 26, ay = cy - 15;
-    oled.drawLine(ax - 3, ay - 3, ax + 3, ay + 3);
-    oled.drawLine(ax + 3, ay - 3, ax - 3, ay + 3);
-  }
-  if (hearts) {
-    oled.setDrawColor(1);
-    int hop = (now / 240) % 6;
-    moodHeart(20, 22 - hop, 4);
-    moodHeart(108, 26 - hop, 3);
-  }
-  if (now < faceHintUntil && !eating) {
-    oled.setDrawColor(1);
-    oled.setFont(u8g2_font_5x7_tf);
-    const char* hint = "tahan = menu";
-    oled.drawStr((128 - oled.getStrWidth(hint)) / 2, 63, hint);
-  }
-  oled.setDrawColor(1);
+  oled.drawStr(10, 6, label);
 }
-
 static void drawFace() {
   // Ekspresi acak: ambil potongan 6..14 frame dari 13..58, putar bolak-balik,
   // lalu diam selama 0.8..5 detik sebelum memilih potongan baru.
@@ -1054,11 +919,6 @@ static void drawFace() {
   if (faceFrozen >= 0) {
     oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
                   dasaiFrame((uint8_t)faceFrozen));
-    return;
-  }
-
-  if (screen == SCR_EAT || mood != Mood::Happy || react != React::None) {
-    drawMoodFace(now);
     return;
   }
 
@@ -1097,6 +957,7 @@ static void drawFace() {
 
   oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
                 dasaiFrame((uint8_t)exprPos));
+  drawMoodBadge(now);
 }
 
 static void drawHome() {
