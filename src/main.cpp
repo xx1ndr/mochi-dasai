@@ -1767,7 +1767,7 @@ button{background:#3ddc97;color:#0b0b0b;border:0;font-weight:700}
 button.alt{background:#1c1c1c;color:#eee;border:1px solid #3a3a3a;font-weight:600}
 a{color:#3ddc97}
 </style>
-<img src="/mochi.gif" alt="animasi mochi dasai" width=256
+<img src="/mochi.gif?v=2" alt="animasi mochi dasai" width=256
      style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
 <p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
   animasi mochi &middot; sleepy.gif &middot; <a href="/mochi.gif">buka GIF</a>
@@ -2280,7 +2280,10 @@ static void setupWeb() {
   web.on("/map", HTTP_GET, []() { web.send_P(200, "text/html", MAP_HTML); });
   // GIF animasi mochi (sama dengan yang dipakai di OLED).
   web.on("/mochi.gif", HTTP_GET, []() {
-    web.sendHeader("Cache-Control", "public, max-age=86400");
+    // Jangan cache: dulu max-age=86400 bikin HP tetap tampil GIF lama.
+    web.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    web.sendHeader("Pragma", "no-cache");
+    web.sendHeader("Expires", "0");
     web.send_P(200, "image/gif", (const char*)MOCHI_WEB_GIF, MOCHI_WEB_GIF_LEN);
   });
 
@@ -2713,21 +2716,16 @@ void setup() {
   oled.setBusClock(400000);
   oled.setContrast(180);
 
-  // Splash restart: sleepy.gif (set Mood::Sleepy) sesuai permintaan.
+  // Splash restart: animasi mochi DASAI asli (90 frame, sebelum GIF gift).
   // Full contrast sejak awal -- tidak ada efek redup/kedip.
-  {
-    const uint8_t set = (uint8_t)Mood::Sleepy;
-    uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[set]) /
-                               MOOD_FRAME_BYTES);
-    for (int i = 0; i < 20; ++i) {
-      oled.clearBuffer();
-      oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(set, i));
-      oled.sendBuffer();
-      uint16_t d = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + i]) * 10;
-      delay(d ? d : 70);
-    }
+  for (int i = 0; i < 24; ++i) {
+    oled.clearBuffer();
+    oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
+                  dasaiFrame((uint8_t)(FACE_LOOP_FIRST + i)));
+    oled.sendBuffer();
+    delay(60);
   }
-  faceStartFrame = 0;                   // lanjut ke idle normal dari frame 0
+  faceStartFrame = FACE_LOOP_FIRST + 24; // lanjut tanpa loncat ke frame 0
 
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 
