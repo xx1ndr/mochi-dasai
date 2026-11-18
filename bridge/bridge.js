@@ -198,6 +198,21 @@ client.on('disconnected', (reason) => {
 });
 
 client.on('message', async (msg) => {
+  const body = (msg.body || '').trim();
+
+  // Baterai dari Shortcuts iPhone: "#batt 85 1" (level, 1=mengisi).
+  // Diproses sebelum filter IGNORE_SELF karena shortcut kirim ke diri sendiri.
+  const batt = !msg.isGroup && body.match(/^#batt(?:erai)?\s+(\d{1,3})\s*([01]?)$/i);
+  if (batt) {
+    const lvl = Math.max(0, Math.min(100, parseInt(batt[1], 10)));
+    const chg = batt[2] === '1' ? 1 : 0;
+    if (tulisEsp(`B${lvl}|${chg}\n`)) {
+      console.log(`[baterai] WA -> ESP32: ${lvl}% ${chg ? '(mengisi)' : ''}`);
+      try { if (msg.react) await msg.react('🔋'); } catch (_) {}
+    }
+    return;
+  }
+
   if (IGNORE_GROUPS && msg.isGroup) return;
   if (IGNORE_SELF && msg.fromMe) return;
 

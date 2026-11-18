@@ -369,6 +369,10 @@ Catatan:
 - ESP32 tanya server tiap 4 detik (`getUpdates`, koneksi TLS dipakai ulang),
   jadi tidak ada port forwarding / webhook yang perlu disetel.
 - Pesan lebih dari ~70 karakter dipotong di layar.
+- Kirim `#batt 85 1` ke bot untuk mengisi baterai iPhone di OLED
+  (`1` = sedang mengisi). Ini jalur paling enak untuk sync otomatis dari
+  Shortcuts tanpa hotspot — lihat `docs/IPHONE_BATTERY.md`. Pesan lain tetap
+  jadi notifikasi `[TG]` biasa.
 
 ---
 

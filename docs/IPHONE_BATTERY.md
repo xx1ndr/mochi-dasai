@@ -9,6 +9,35 @@ IP yang dipakai contoh di bawah adalah `192.168.4.1` (AP fallback
 ganti dengan IP LAN-nya (lihat layar **SISTEM** baris `ip ...` atau
 `/api/status`).
 
+## Opsi terbaik: bot Telegram (tanpa hotspot)
+
+ESP32 sudah bisa tanya Telegram Bot API tiap 4 detik — tidak perlu PC, tidak
+perlu kabel, dan iPhone boleh pakai sinyal seluler.
+
+1. Buat bot lewat **@BotFather** → `/newbot`, lalu isi token di
+   `include/config.h`:
+   ```c
+   #define TELEGRAM_TOKEN "123456789:AAH..."
+   ```
+   Upload ulang firmware. (Wajib: ESP32 harus tersambung WiFi `WiFI_RUMAH` agar
+   punya internet.)
+2. Di Telegram, buka bot kamu dan tekan **Start**.
+3. Di Shortcuts, tambahkan aksi **Kirim Pesan** Telegram → penerima = bot kamu,
+   pesan:
+   ```
+   #batt Bat Chg
+   ```
+   (`Bat` dan `Chg` adalah Magic Variable dari langkah sebelumnya.)
+4. Pasang otomatisasi seperti di bawah — pesan masuk ke bot, ESP32 membacanya
+   maksimal ~4 detik kemudian.
+
+Perintah yang dikenal: `#batt 85 1` (85%, mengisi) atau `#batt 42 0`.
+Pesan lain tetap tampil sebagai notifikasi `[TG]` biasa.
+
+Alternatif tanpa token: kalau bridge WA jalan di PC, kirim pesan WA dengan isi
+yang sama (`#batt 85 1`) ke nomor sendiri — bridge meneruskannya lewat kabel
+COM8. Ini berguna kalau ESP32 belum punya internet.
+
 ## Cara cepat uji
 
 Buka Safari di HP yang sudah tersambung ke hotspot `mochi-dasai`:
@@ -32,7 +61,8 @@ Buat satu shortcut bernama **Kirim Baterai ke Mochi**:
 | 4 | **Jika** / *If* | `Status Pengisian` **adalah** `Mengisi` / *Charging* |
 | 5 | → di dalam **Jika**: Atur Variabel | `Chg` = `1` |
 | 6 | → di **Selain itu** (*Otherwise*): Atur Variabel | `Chg` = `0` |
-| 7 | **Ambil Isi URL** / *Get Contents of URL* | Method `GET`, URL di bawah |
+| 7a | **Ambil Isi URL** / *Get Contents of URL* (lembah WiFi) | Method `GET`, URL di bawah |
+| 7b | atau **Kirim Pesan** Telegram ke bot (sinyal seluler) | `#batt Bat Chg` |
 
 URL (pilih `Bat` dan `Chg` lewat **Magic Variable**, jangan diketik sebagai
 teks biasa):

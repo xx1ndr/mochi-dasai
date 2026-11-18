@@ -774,6 +774,16 @@ static void telegramTask() {
     const char* text = m["text"] | "";
     if (!*text) text = "[media]";
 
+    // Perintah baterai dari Shortcuts iPhone: "#batt 85 1"
+    // (1 = sedang mengisi). Tidak perlu PC/hotspot,ESP32 baca langsung dari bot.
+    if (strncmp(text, "#batt", 5) == 0) {
+      int lvl = -1, chg = 0;
+      if (sscanf(text + 5, " %d %d", &lvl, &chg) >= 1 && lvl >= 0 && lvl <= 100) {
+        setPhoneBattery(lvl, chg > 0);
+        continue;
+      }
+    }
+
     addNotification("TG", name, text);
   }
   primed = true;
