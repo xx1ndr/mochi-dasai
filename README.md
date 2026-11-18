@@ -459,8 +459,10 @@ bongkahan putih. `mi_bef.gif` tetap disematkan di
 
 Cukup masukkan tujuan, ESP32 yang menentukan belokannya:
 
-1. Pastikan GPS dapat fix (cek `/api/status` → `gps.fix: true`) dan WiFi
-   tersambung internet.
+1. Modul GPS **tidak wajib**. Posisi diambil berurutan dari: modul GPS → lokasi
+   HP yang dikirim halaman web (`/location`) → geolokasi IP → titik default
+   `HOME_LAT/HOME_LON`. Buka halaman web di HP dan biarkan **Ikuti lokasi
+   otomatis** aktif supaya posisi HP dikirim tiap beberapa detik saat rute jalan.
 2. Buka halaman web → **navigasi otomatis**.
 3. Ketik nama tempat di **Cari tempat** (misal `Monas Jakarta`) → klik **Cari**;
    koordinat tujuan otomatis terisi. Boleh juga isi `latitude`/`longitude`
@@ -468,12 +470,16 @@ Cukup masukkan tujuan, ESP32 yang menentukan belokannya:
 4. Klik **Mulai navigasi**. OLED langsung menampilkan panah belokan pertama.
 
 Selanjutnya **otomatis**: saat kamu bergerak, jarak ke belokan dihitung mundur
-dari posisi GPS, dan panah berganti ke belokan berikutnya. Sesampainya di tujuan
-muncul **TIBA DI TUJUAN**. Tombol **Hentikan navigasi** mengakhiri rute.
+dari posisi terbaik yang tersedia, dan panah berganti ke belokan berikutnya.
+Sesampainya di tujuan muncul **TIBA DI TUJUAN**. Tombol **Hentikan navigasi**
+mengakhiri rute.
 
 Rute diambil dari **OSRM** (`router.project-osrm.org`) dan geocoding dari
-**Nominatim** — keduanya gratis tanpa API key. Titik awal rute = posisi GPS
-(atau lokasi cuaca bila GPS belum fix). Akurasi geocoding IP setingkat kota.
+**Nominatim** — keduanya gratis tanpa API key. Kalau server rute tidak bisa
+diajak bicara (WiFi belum join `WiFI_RUMAH`, internet mati, atau OSRM sibuk), firmware
+otomatis memakai **panah kompas langsung ke tujuan** (8 arah + jarak + derajat),
+jadi navigasi tetap bisa dipakai. Tombol **Panah kompas (tanpa rute/GPS)**
+memaksa mode ini. Akurasi geocoding IP setingkat kota.
 
 Kalau pencarian gagal, pesan di halaman web sekarang menyebut alasan aslinya
 (`WiFi mati`, `Server sibuk`, atau `Tempat tidak ditemukan`). Query pendek
@@ -484,7 +490,8 @@ Nominatim membatasi 1 request/detik, jadi jeda sekitar 1 detik antar pencarian.
 Endpoint:
 
 ```
-/goto?lat=-6.1754&lon=106.8272     mulai rute otomatis
+/goto?lat=-6.1754&lon=106.8272     mulai rute otomatis (OSRM)
+/goto?nogeo=1&lat=-6.1754&lon=106.8272  panah kompas tanpa OSRM / tanpa GPS
 /find?q=Monas%20Jakarta            cari tempat -> lat/lon
 /goto?stop=1                       hentikan rute
 ```
@@ -510,5 +517,6 @@ http://192.168.4.1/nav?kind=left&dist=200&road=Jl.%20Sudirman
 | `dist` | jarak ke belokan dalam meter (`50`, `200`, atau `1200` → otomatis tampil km) |
 | `road` | nama jalan, maksimal ~24 karakter |
 
-Selama rute aktif (5 menit sejak kiriman terakhir) layar tidak ikut pindah
-otomatis, jadi panah belokan tetap kelihatan.
+Selama rute aktif (30 menit sejak kiriman terakhir) layar tidak ikut pindah
+otomatis, jadi panah belokan tetap kelihatan. Mode kompas juga memperbarui
+`nav.at` tiap detik supaya tidak kedaluwarsa selama posisi masih dikirim.

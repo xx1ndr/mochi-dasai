@@ -144,7 +144,9 @@ static bool     forceWeather = false;
 // ---- perintah belokan (/nav manual) + rute otomatis (/goto, OSRM tanpa API key)
 enum NavKind : uint8_t {
   NAV_STRAIGHT, NAV_LEFT, NAV_RIGHT, NAV_SLIGHT_LEFT,
-  NAV_SLIGHT_RIGHT, NAV_UTURN, NAV_ROUNDABOUT, NAV_ARRIVE
+  NAV_SLIGHT_RIGHT, NAV_UTURN, NAV_ROUNDABOUT, NAV_ARRIVE,
+  // Panah kompas ke tujuan (mode tanpa OSRM / tanpa GPS).
+  NAV_N, NAV_NE, NAV_E, NAV_SE, NAV_S, NAV_SW, NAV_W, NAV_NW
 };
 
 struct NavStep {
@@ -155,7 +157,7 @@ struct NavStep {
   uint32_t at;        // millis() saat diterima
 };
 static NavStep nav = {false, NAV_STRAIGHT, 0, "", 0};
-static const uint32_t NAV_TTL_MS = 5UL * 60UL * 1000UL;   // 5 menit
+static const uint32_t NAV_TTL_MS = 30UL * 60UL * 1000UL;  // 30 menit (dulu 5 menit)
 
 // Rute otomatis: petunjuk diambil dari OSRM, maju mengikuti posisi GPS.
 struct RouteStep {
@@ -170,6 +172,9 @@ static bool     routeActive  = false;
 static uint32_t routeTravelled = 0;
 static uint32_t routeTotal   = 0;
 static double   routeLastLat = 0, routeLastLon = 0;
+
+// Tujuan navigasi terakhir, dipakai mode kompas saat OSRM tidak tersedia.
+static double   navDestLat = NAN, navDestLon = NAN;
 
 static bool     apOk    = false;   // hasil WiFi.softAP()
 static uint32_t frameMs = 0;       // lama kirim 1 frame ke OLED
@@ -668,6 +673,9 @@ static void geoIpTask() {
   wxIpLat = la;
   wxIpLon = lo;
   wxIpAge = now;
+  // Supaya /api/status, peta, dan cuaca ikut lokasi IP (bukan Jakarta default).
+  // wxLocSet sengaja tidak diset: sumber tetap dilaporkan sebagai "ip".
+  if (!wxLocSet) { wxLat = la; wxLon = lo; }
   Serial.printf("[geo] IP -> %.4f,%.4f (%s)\n", la, lo, doc["city"] | "?");
 }
 #endif // AUTO_IP_GEO
@@ -1029,9 +1037,8 @@ static void drawMoodBadge(uint32_t now) {
   oled.drawStr(10, 63, label);
 }
 static void drawFace() {
-  // Animasi mengikuti mood: 5 GIF ekspresi, masing-masing ~75 frame dengan
-  // delay aslinya 60/70 ms. Urutan set = enum Mood (lihat mood_frames.h).
-  static uint8_t  whichNow = 0xFF;   // set frame yang sedang diputar
+  // Idle = mi_bef.gif (animasi sebelum gift). Mood = 5 GIF ekspresi.
+  static uint8_t  whichNow = 0xFF;   // 0xFF = idle mi_bef, selain itu = mood
   static uint16_t frame = 0;
   static uint32_t last  = 0;
   uint32_t now = millis();
@@ -1045,9 +1052,9 @@ static void drawFace() {
     return;
   }
 
-  // Idle = relaxed.gif sampai mood dipilih; setelah itu animasi mood-nya.
-  uint8_t which = moodIdle ? MOOD_IDLE_SET : (uint8_t)mood;
-  if (which >= MOOD_GIF_COUNT) which = 0;
+  uint8_t which = moodIdle ? 0xFF : (uint8_t)mood;
+  bool isMochi = (which == 0xFF);
+  if (which >= MOOD_GIF_COUNT && !isMochi) which = 0;
   if (which != whichNow) {              // ganti ekspresi -> mulai dari frame 0
     whichNow = which;
     frame = faceStartFrame;             // 0 normal, atau lanjutan setelah splash
@@ -1055,10 +1062,17 @@ static void drawFace() {
     last  = now;
   }
 
-  uint16_t cnt  = pgm_read_word(&MOOD_FRAME_COUNTS[which]);
-  uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[which]) /
-                             MOOD_FRAME_BYTES);
-  uint16_t delay = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + frame]) * 10;
+  uint16_t cnt;
+  uint16_t delay;
+  if (isMochi) {
+    cnt   = MOCHI_FRAME_COUNT;
+    delay = (uint16_t)pgm_read_word(&MOCHI_DELAYS[frame]);
+  } else {
+    cnt  = pgm_read_word(&MOOD_FRAME_COUNTS[which]);
+    uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[which]) /
+                               MOOD_FRAME_BYTES);
+    delay = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + frame]) * 10;
+  }
   if (delay == 0) delay = 70;
 
   if (now - last >= delay) {
@@ -1068,7 +1082,10 @@ static void drawFace() {
     frame = (frame + steps) % cnt;
   }
 
-  oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(which, frame));
+  if (isMochi)
+    oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(frame));
+  else
+    oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(which, frame));
   drawMoodBadge(now);
 }
 
@@ -1140,7 +1157,26 @@ static void thickLine(int x0, int y0, int x1, int y1, int w) {
   }
 }
 
+// Panah kompas: 0=Utara, 1=Timur Laut, ... 7=Barat Laut.
+static void drawCompassArrow(int cx, int cy, uint8_t dir) {
+  const float kRad = 0.0174532925f;
+  float rad = (float)dir * 45.0f * kRad;
+  float dx = sin(rad), dy = -cos(rad);       // 0 derajat = atas
+  float px = -dy, py = dx;                   // tegak lurus
+  int x0 = cx - (int)(dx * 11), y0 = cy - (int)(dy * 11);
+  int x1 = cx + (int)(dx * 11), y1 = cy + (int)(dy * 11);
+  thickLine(x0, y0, x1, y1, 5);
+  int hx = x1 - (int)(dx * 8), hy = y1 - (int)(dy * 8);
+  oled.drawTriangle(x1, y1,
+                    hx + (int)(px * 7), hy + (int)(py * 7),
+                    hx - (int)(px * 7), hy - (int)(py * 7));
+}
+
 static void drawTurnIcon(int cx, int cy, uint8_t kind) {
+  if (kind >= NAV_N && kind <= NAV_NW) {
+    drawCompassArrow(cx, cy, (uint8_t)(kind - NAV_N));
+    return;
+  }
   switch (kind) {
     case NAV_LEFT:
       oled.drawTriangle(cx - 17, cy, cx - 1, cy - 12, cx - 1, cy + 12);
@@ -1199,6 +1235,14 @@ static const char* navText(uint8_t kind) {
     case NAV_UTURN:        return "PUTAR BALIK";
     case NAV_ROUNDABOUT:   return "BUNDARAN";
     case NAV_ARRIVE:       return "TIBA DI TUJUAN";
+    case NAV_N:            return "ARAH UTARA";
+    case NAV_NE:           return "ARAH TIMUR LAUT";
+    case NAV_E:            return "ARAH TIMUR";
+    case NAV_SE:           return "ARAH TENGGARA";
+    case NAV_S:            return "ARAH SELATAN";
+    case NAV_SW:           return "ARAH BARAT DAYA";
+    case NAV_W:            return "ARAH BARAT";
+    case NAV_NW:           return "ARAH BARAT LAUT";
     default:               return "LURUS";
   }
 }
@@ -1853,8 +1897,9 @@ function notifyBeepTest(){
 <button class=alt onclick="locateNow()">Cari lokasi sekarang</button>
 <h3>navigasi otomatis</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
-  Masukkan tujuan (nama tempat atau koordinat). ESP32 mengambil rute dari posisi
-  GPS, lalu otomatis mengganti panah belokan saat kamu bergerak. Butuh GPS fix + internet.
+  Masukkan tujuan (nama tempat atau koordinat). Posisi boleh dari modul GPS,
+  lokasi HP, atau IP -- GPS tidak wajib. Kalau server rute tidak bisa diakses,
+  otomatis dipakai panah kompas ke tujuan.
 </p>
 <form onsubmit="event.preventDefault();
   fetch('/find?q='+encodeURIComponent(q.value)).then(r=>r.json()).then(d=>{
@@ -1871,6 +1916,7 @@ function notifyBeepTest(){
   <input id=lo2 type=number step=0.0001 placeholder="longitude tujuan">
   <button>Mulai navigasi</button>
 </form>
+<button class=alt onclick="fetch('/goto?nogeo=1&lat='+encodeURIComponent(la2.value)+'&lon='+encodeURIComponent(lo2.value)).then(r=>r.json()).then(d=>{$('routeErr').textContent=d.msg;navUpd()})">Panah kompas (tanpa rute/GPS)</button>
 <p id=routeInfo style="font-size:12px">-</p>
 <p id=routeErr style="font-size:12px;color:#3ddc97"></p>
 <button class=alt onclick="fetch('/goto?stop=1').then(r=>r.json()).then(d=>{$('routeErr').textContent=d.msg;navUpd()})">Hentikan navigasi</button>
@@ -1904,9 +1950,12 @@ function tgUpd(){fetch('/telegram').then(r=>r.json()).then(t=>{
 })}
 function navUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
   const g=s.gps||{};
-  $('routeInfo').textContent = s.route_active
-    ? 'Belok '+s.nav+' · sisa '+(s.nav_dist||0)+' m · total '+(s.route_total||0)+' m · '+(g.sats||0)+' satelit'
+  const aktif = s.route_active || !!s.nav;
+  $('routeInfo').textContent = aktif
+    ? s.nav+' · sisa '+(s.nav_dist||0)+' m · '+(s.route_active?('total '+(s.route_total||0)+' m · '):'')+(g.fix?'GPS':'lokasi HP/IP')
     : 'Rute tidak aktif · GPS '+(g.fix?'fix':'cari satelit');
+  // Tanpa modul GPS, posisi HP dikirim ulang supaya jarak/panah terus jalan.
+  if (aktif && $('autoLoc').checked && !g.fix) locateNow();
 })}
 function kirimLokasi(lat,lon,sumber){
   fetch('/location?lat='+Number(lat).toFixed(5)+'&lon='+Number(lon).toFixed(5))
@@ -1933,7 +1982,7 @@ function locateNow(){
     navigator.geolocation.getCurrentPosition(
       p=>kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP'),
       e=>lokasiDariIP(),
-      {enableHighAccuracy:false, timeout:8000, maximumAge:300000}
+      {enableHighAccuracy:false, timeout:8000, maximumAge:5000}
     );
   } else lokasiDariIP();
 }
@@ -2092,18 +2141,19 @@ static uint8_t mapManeuver(const char* type, const char* modifier) {
   return NAV_STRAIGHT;
 }
 
-static double routeStartLat() {
-  if (gps.location.isValid() && gps.location.age() < 5000) return gps.location.lat();
-  if (wxLocSet) return wxLat;
-  if (!isnan(wxIpLat)) return wxIpLat;
-  return HOME_LAT;
+// Posisi aktual: GPS -> lokasi HP/web/serial -> geolokasi IP -> HOME.
+// Dipakai titik awal rute DAN progres navigasi, supaya tetap jalan tanpa GPS.
+static bool currentPos(double& lat, double& lon) {
+  if (gps.location.isValid() && gps.location.age() < 5000) {
+    lat = gps.location.lat(); lon = gps.location.lng(); return true;
+  }
+  if (wxLocSet)              { lat = wxLat;    lon = wxLon;    return true; }
+  if (!isnan(wxIpLat))       { lat = wxIpLat;  lon = wxIpLon;  return true; }
+  lat = HOME_LAT; lon = HOME_LON;
+  return true;
 }
-static double routeStartLon() {
-  if (gps.location.isValid() && gps.location.age() < 5000) return gps.location.lng();
-  if (wxLocSet) return wxLon;
-  if (!isnan(wxIpLon)) return wxIpLon;
-  return HOME_LON;
-}
+static double routeStartLat() { double la, lo; currentPos(la, lo); return la; }
+static double routeStartLon() { double la, lo; currentPos(la, lo); return lo; }
 
 static void applyRouteStep() {
   if (!routeActive || routeCount == 0) return;
@@ -2158,6 +2208,45 @@ static bool fetchRoute(const char* host, bool secure, double slon, double slat,
   payload = http.getString();
   http.end();
   return payload.length() > 0;
+}
+
+// Arah kompas (derajat, 0=Utara) dari posisi sekarang ke tujuan.
+static double bearingDeg(double la1, double lo1, double la2, double lo2) {
+  const float kRad = 0.0174532925f;
+  double p1 = la1 * kRad, p2 = la2 * kRad;
+  double dl = (lo2 - lo1) * kRad;
+  double y = sin(dl) * cos(p2);
+  double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl);
+  double d = atan2(y, x) / kRad;
+  if (d < 0) d += 360.0;
+  return d;
+}
+
+// Cadangan tanpa OSRM: panah kompas langsung ke tujuan. Tetap jalan walau
+// server rute tidak bisa diakses, asal posisi didapat dari GPS/HP/IP.
+static bool startBearingMode(char* msg, size_t msgLen) {
+  if (isnan(navDestLat) || isnan(navDestLon)) {
+    snprintf(msg, msgLen, "Tujuan belum diisi");
+    return false;
+  }
+  double la, lo;
+  currentPos(la, lo);
+  double dist = TinyGPSPlus::distanceBetween(la, lo, navDestLat, navDestLon);
+  double brg  = bearingDeg(la, lo, navDestLat, navDestLon);
+  uint8_t dir = (uint8_t)(fmod(brg + 22.5, 360.0) / 45.0) % 8;
+
+  routeActive = false;
+  routeCount  = 0;
+  nav.kind    = (uint8_t)(NAV_N + dir);
+  nav.dist    = (uint16_t)(dist > 60000 ? 60000 : dist);
+  snprintf(nav.road, sizeof(nav.road), "ARAH %03d", (int)brg);
+  nav.at      = millis();
+  nav.valid   = true;
+  screen      = SCR_GPS;
+
+  snprintf(msg, msgLen, "Panah ke tujuan: %.0f m, arah %03d", dist, (int)brg);
+  Serial.printf("[nav] %s\n", msg);
+  return true;
 }
 
 // Ambil rute dari posisi sekarang ke tujuan, lalu simpan petunjuk belokannya.
@@ -2246,13 +2335,30 @@ static bool startRoute(double destLat, double destLon, char* msg, size_t msgLen)
   return true;
 }
 
-// Maju ke petunjuk berikutnya mengikuti jarak yang benar-benar ditempuh GPS.
+// Maju ke petunjuk berikutnya mengikuti jarak yang benar-benar ditempuh.
+// Posisi boleh dari GPS, HP/web, atau IP -- navigasi jalan tanpa modul GPS.
 static void navTask() {
+  // Mode kompas: arah & jarak ikut posisi terbaru walau tanpa rute OSRM.
+  if (!routeActive && nav.valid && nav.kind >= NAV_N && nav.kind <= NAV_NW) {
+    if (isnan(navDestLat) || isnan(navDestLon)) return;
+    static uint32_t lastCmp = 0;
+    if (millis() - lastCmp > 1000) {
+      lastCmp = millis();
+      double la, lo;
+      currentPos(la, lo);
+      double dist = TinyGPSPlus::distanceBetween(la, lo, navDestLat, navDestLon);
+      double brg  = bearingDeg(la, lo, navDestLat, navDestLon);
+      uint8_t dir = (uint8_t)(fmod(brg + 22.5, 360.0) / 45.0) % 8;
+      nav.kind = (uint8_t)(NAV_N + dir);
+      nav.dist = (uint16_t)(dist > 60000 ? 60000 : dist);
+      snprintf(nav.road, sizeof(nav.road), "ARAH %03d", (int)brg);
+      nav.at = millis();                    // heartbeat supaya tidak kedaluwarsa
+    }
+    return;
+  }
   if (!routeActive || routeCount == 0) return;
-  if (!gps.location.isValid() || gps.location.age() > 5000) return;
-
-  double lat = gps.location.lat();
-  double lon = gps.location.lng();
+  double lat, lon;
+  currentPos(lat, lon);
   double d = TinyGPSPlus::distanceBetween(routeLastLat, routeLastLon, lat, lon);
   if (d >= 0 && d < 500.0) {
     routeTravelled += (uint32_t)d;
@@ -2366,6 +2472,8 @@ static void setupWeb() {
       routeActive = false;
       routeCount  = 0;
       nav.valid   = false;
+      navDestLat  = NAN;
+      navDestLon  = NAN;
       web.send(200, "application/json",
                "{\"ok\":true,\"msg\":\"Navigasi dihentikan\"}");
       return;
@@ -2382,8 +2490,16 @@ static void setupWeb() {
                "{\"ok\":false,\"msg\":\"Koordinat tidak valid\"}");
       return;
     }
+    navDestLat = la;              // simpan tujuan untuk mode kompas cadangan
+    navDestLon = lo;
     char msg[96];
-    bool ok = startRoute(la, lo, msg, sizeof(msg));
+    bool ok = false;
+    if (!web.hasArg("nogeo") && WiFi.status() == WL_CONNECTED)
+      ok = startRoute(la, lo, msg, sizeof(msg));
+    if (!ok) {
+      // Rute OSRM gagal / tanpa internet -> panah kompas langsung ke tujuan.
+      ok = startBearingMode(msg, sizeof(msg));
+    }
 
     JsonDocument out;
     out["ok"]    = ok;
