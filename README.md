@@ -156,7 +156,7 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
 ## 4. Cara pakai
 
-- Layar pertama = **animasi idle `sleepy_3.gif`** (75 frame 128x64 1-bit,
+- Layar pertama = **animasi idle `happy.gif`** (75 frame 128x64 1-bit,
   60–70 ms per frame, ≈15 fps). Saat mood dipilih, animasi berganti sesuai mood
   (Ngantuk = `embarrassed.gif`). Mood tetap tersimpan dan tampil sebagai label
   kecil di sudut kiri-bawah. GIF idle bisa dilihat di
@@ -222,8 +222,8 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 | `/face?frame=45` | diagnosa: diamkan animasi DASAI di satu frame |
 | `/face?auto=1` | lanjutkan animasi wajah normal |
 | `/maps` (atau `/map`) | monitor GPS: peta Google Maps live + marker, auto-refresh 3 detik |
-| `/mochi.gif` | animasi mochi 77 frame dari `mi_bef.gif` (sama dengan OLED) |
-| `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`) |
+| `/mochi.gif` | animasi idle `happy.gif` (versi kecil 128x81) |
+| `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`); `idle` kembali ke animasi `happy.gif` tanpa badge |
 | `/feed` | kasih makan (langsung tampil animasi "Nyam") |
 | `/battery?level=85&charging=1` | set baterai iPhone (0–100, `charging` 0/1) |
 | `/telegram?token=...` | simpan token bot Telegram di NVS (`?clear=1` = hapus) |
@@ -429,7 +429,7 @@ Frame ada di `include/mood_frames.h` (6 set × 75 frame, 128x64 1-bit, PROGMEM):
 
 | Kondisi | GIF | Set |
 |---|---|---|
-| Idle (belum ada mood dipilih) | `sleepy_3.gif` | 5 |
+| Idle (belum ada mood dipilih) | `happy.gif` | 5 |
 | Senang | `happy_2.gif` | 0 |
 | Sedih | `love.gif` | 1 |
 | Marah | `angry.gif` | 2 |
@@ -437,16 +437,19 @@ Frame ada di `include/mood_frames.h` (6 set × 75 frame, 128x64 1-bit, PROGMEM):
 | Lapar | `excited_2.gif` | 4 |
 
 Diputar looping di `drawFace()` (`src/main.cpp`) dengan delay asli 60/70 ms per
-frame. Splash restart dan diagnosa `/face?frame=N` memakai set idle.
+frame. Splash restart dan diagnosa `/face?frame=N` memakai set idle. Generator
+memakai **threshold adaptif per frame** (~34% piksel putih) supaya tidak ada
+frame yang jadi blok putih penuh atau hampir hitam — ini memperbaiki animasi
+yang dulu tampak "nge bug".
 
 File animasi lama (`dasai_frames.h`, `mochi_gif.h`, `mochi_frames.h`) sudah
-dihapus. `include/mochi_web_gif.h` berisi versi kecil `sleepy_3.gif` untuk
+dihapus. `include/mochi_web_gif.h` berisi versi kecil `happy.gif` untuk
 endpoint `/mochi.gif`.
 
 | Mau ubah | Di mana |
 |---|---|
 | ganti GIF mood/idle | edit `$gifs` di `tools/make_mood_frames.ps1`, lalu jalankan `powershell -File tools\make_mood_frames.ps1` |
-| crop / threshold | `-CropX -CropY -CropW -CropH -Threshold` di script tersebut |
+| crop / target kecerahan | `-CropX -CropY -CropW -CropH -TargetWhite -MinThreshold` di script tersebut |
 | kecepatan animasi | `MOOD_DELAYS` di `include/mood_frames.h` (unit 10 ms) |
 | label mood kecil | `drawMoodBadge()` di `src/main.cpp` |
 

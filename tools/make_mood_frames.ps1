@@ -1,24 +1,25 @@
-# Konversi 5 GIF ekspresi jadi frame OLED 1-bit 128x64 untuk animasi mood.
+# Konversi GIF ekspresi jadi frame OLED 1-bit 128x64 untuk animasi mood + idle.
 # Pakai: powershell -File tools\make_mood_frames.ps1
-# Urutan set mengikuti enum Mood di main.cpp: Happy, Sad, Angry, Sleepy, Hungry.
+# Urutan set: Happy, Sad, Angry, Sleepy, Hungry (enum Mood), lalu Idle.
 param(
   [string]$Dir   = 'D:\Download\example gift\example gift',
   [string]$Out   = 'include\mood_frames.h',
-  [int]$CropX    = 24, [int]$CropY = 24,
-  [int]$CropW    = 432, [int]$CropH = 216,   # rasio 2:1 = OLED 128x64
-  [int]$Threshold = 280   # GIF berwarna: 120 membuat hampir semua area jadi putih
+  [int]$CropX    = 0, [int]$CropY = 32,
+  [int]$CropW    = 480, [int]$CropH = 240,   # rasio 2:1 = OLED 128x64
+  [double]$TargetWhite = 0.34,               # proporsi piksel putih tiap frame
+  [int]$MinThreshold   = 50                  # jangan sampai background gelap ikut putih
 )
 
 Add-Type -AssemblyName System.Drawing
 
-# (nama file, jumlah frame, keterangan) -- urutan HARUS sama dengan enum Mood.
+# (nama file, keterangan) -- urutan HARUS sama dengan enum Mood, idle di akhir.
 $gifs = @(
   'happy_2.gif',      # Senang
   'love.gif',         # Sedih
   'angry.gif',        # Marah
-  'embarrassed.gif',  # Ngantuk (request user)
+  'embarrassed.gif',  # Ngantuk
   'excited_2.gif',    # Lapar
-  'sleepy_3.gif'      # Idle (wajah/default, bukan mood)
+  'happy.gif'         # Idle (wajah/default sesuai request user)
 )
 
 $allBytes  = New-Object 'System.Collections.Generic.List[byte]'
@@ -28,9 +29,8 @@ $offsets   = @()
 
 $small = New-Object System.Drawing.Bitmap(128, 64)
 $g = [System.Drawing.Graphics]::FromImage($small)
-# GIF ekspresi punya gradient/dithering. Nearest-neighbor + threshold bikin
-# bintik-bintik putih acak ("gambar pecah"). Bicubic merata-ratakan warna
-# sebelum threshold supaya garisnya bersih di OLED 1-bit.
+# GIF ekspresi punya gradient/dithering. Bicubic merata-ratakan warna sebelum
+# threshold supaya garisnya bersih di OLED 1-bit (nearest-neighbor bikin bintik).
 $g.InterpolationMode  = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
 $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
 $g.SmoothingMode      = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
@@ -38,6 +38,13 @@ $g.PixelOffsetMode    = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
 $g.CompositingMode    = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
 $dest = New-Object System.Drawing.Rectangle(0, 0, 128, 64)
 $src  = New-Object System.Drawing.Rectangle($CropX, $CropY, $CropW, $CropH)
+
+# Baca piksel 128x64 dari canvas ke array B,G,R,A (format Format32bppArgb).
+function Read-Canvas($data) {
+  $buf = New-Object byte[] ($data.Stride * 64)
+  [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $buf.Length)
+  return ,$buf
+}
 
 foreach ($name in $gifs) {
   $path = Join-Path $Dir $name
@@ -61,6 +68,8 @@ foreach ($name in $gifs) {
 
   $offsets += $allBytes.Count
   $counts  += $count
+  $thrMin = 9999
+  $thrMax = 0
 
   for ($f = 0; $f -lt $count; $f++) {
     $img.SelectActiveFrame([System.Drawing.Imaging.FrameDimension]::Time, $f) | Out-Null
@@ -71,20 +80,43 @@ foreach ($name in $gifs) {
 
     $data = $small.LockBits($dest, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
                             [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $buf = Read-Canvas $data
     $stride = $data.Stride
-    $buf = New-Object byte[] ($stride * 64)
-    [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $buf.Length)
     $small.UnlockBits($data)
 
+    # Threshold PER FRAME: tiap frame GIF punya kecerahan beda-beda (ada yang
+    # flash putih, ada yang hampir hitam). Cari ambang yang menghasilkan ~34%
+    # piksel putih supaya tidak ada frame yang jadi blok putih penuh / hilang.
+    $hist = New-Object 'int[]' 766
+    $sums = New-Object 'int[]' (128 * 64)
+    $pi = 0
     for ($ty = 0; $ty -lt 64; $ty++) {
       $rowBase = $ty * $stride
+      for ($tx = 0; $tx -lt 128; $tx++) {
+        $p = $rowBase + $tx * 4
+        $s = [int]$buf[$p] + [int]$buf[$p+1] + [int]$buf[$p+2]
+        if ($s -gt 765) { $s = 765 }
+        $hist[$s]++
+        $sums[$pi] = $s
+        $pi++
+      }
+    }
+    $acc = 0
+    $need = 128 * 64 * $TargetWhite
+    $thr = $MinThreshold
+    for ($t = 765; $t -ge $MinThreshold; $t--) {
+      $acc += $hist[$t]
+      if ($acc -ge $need) { $thr = $t; break }
+    }
+    if ($thr -lt $thrMin) { $thrMin = $thr }
+    if ($thr -gt $thrMax) { $thrMax = $thr }
+
+    for ($ty = 0; $ty -lt 64; $ty++) {
       for ($bx = 0; $bx -lt 16; $bx++) {
         $byte = 0
         for ($bit = 0; $bit -lt 8; $bit++) {
           $tx = $bx * 8 + $bit
-          $p = $rowBase + $tx * 4
-          # Format32bppArgb di memory = B,G,R,A
-          if (($buf[$p] + $buf[$p+1] + $buf[$p+2]) -ge $Threshold) {
+          if ($sums[$ty * 128 + $tx] -ge $thr) {
             $byte = $byte -bor (1 -shl $bit)   # LSB-first untuk u8g2 drawXBMP
           }
         }
@@ -95,7 +127,7 @@ foreach ($name in $gifs) {
   }
 
   $img.Dispose()
-  Write-Output "  $name : $count frame, delay $(($delays | Select-Object -Unique) -join '/') x10ms"
+  Write-Output "  $name : $count frame, delay $(($delays | Select-Object -Unique) -join '/') x10ms, thr $thrMin..$thrMax"
 }
 
 $g.Dispose(); $small.Dispose()
@@ -104,12 +136,13 @@ $g.Dispose(); $small.Dispose()
 $lines = @()
 $lines += '// GENERATED oleh tools/make_mood_frames.ps1 dari 6 GIF ekspresi.'
 $lines += '// Urutan set: Senang, Sedih, Marah, Ngantuk, Lapar (enum Mood), lalu Idle.'
+$lines += '// Threshold adaptif PER FRAME (~34% putih) -- tidak ada frame blok putih/hitam.'
 $lines += '// Frame 128x64, 1 bit/px, LSB-first (format u8g2 drawXBMP). Jangan diedit manual.'
 $lines += '#pragma once'
 $lines += '#include <Arduino.h>'
 $lines += ''
 $lines += '#define MOOD_GIF_COUNT    6'
-$lines += '#define MOOD_IDLE_SET     5   // sleepy_3.gif - animasi wajah/default'
+$lines += '#define MOOD_IDLE_SET     5   // happy.gif - animasi wajah/default'
 $lines += '#define MOOD_FRAME_W      128'
 $lines += '#define MOOD_FRAME_H      64'
 $lines += '#define MOOD_FRAME_BYTES  1024'

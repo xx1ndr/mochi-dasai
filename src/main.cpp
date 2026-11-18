@@ -74,7 +74,7 @@ static const char* moodName(Mood m) {
 }
 
 static Mood  mood        = Mood::Happy;
-static bool  moodIdle    = true;   // selalu mi_bef.gif; mood hanya label/data
+static bool  moodIdle    = true;   // belum pilih mood -> pakai animasi idle (happy.gif)
 static React react       = React::None;
 static uint32_t reactUntil = 0;   // millis() akhir animasi reaksi
 static uint32_t faceHintUntil = 0;// millis() akhir petunjuk "tahan = menu"
@@ -359,6 +359,14 @@ static void setMood(Mood next) {
   nvsSet("mood", (uint32_t)next);
   if (next != Mood::Angry) angryPets = 0;
   Serial.printf("[mood] %s\n", moodName(next));
+}
+
+// Kembali ke animasi idle (happy.gif) dan hapus mood tersimpan.
+static void setIdle() {
+  moodIdle = true;
+  mood = Mood::Happy;
+  nvsSet("mood", 0);
+  Serial.println("[mood] idle (happy.gif)");
 }
 
 static void markFed() {
@@ -940,7 +948,8 @@ static void drawStatusBar() {
 
 // ------------------------------------------------------------ wajah mochi
 // Animasi ada di include/mood_frames.h: 5 set mood + 1 set idle.
-// Idle = sleepy_3.gif, Ngantuk = embarrassed.gif (request user).
+// Idle = happy.gif, Ngantuk = embarrassed.gif (request user).
+// Threshold adaptif per frame di generator supaya tidak ada frame blok putih.
 
 static int16_t  faceFrozen = -1;   // >= 0 = tampilkan 1 frame saja (diagnosa /face)
 
@@ -989,6 +998,7 @@ static void moodHeart(int x, int y, int r) {
 }
 
 static void drawMoodBadge(uint32_t now) {
+  if (moodIdle) return;           // idle = animasi happy.gif tanpa badge mood
   bool eating = (screen == SCR_EAT);
   bool hearts = (react == React::Love && now < reactUntil && !eating);
   bool shake  = (react == React::Shake && now < reactUntil);
@@ -1026,7 +1036,7 @@ static void drawMoodBadge(uint32_t now) {
   oled.drawStr(10, 63, label);
 }
 static void drawFace() {
-  // Idle = sleepy_3.gif (set ke-5). Mood = 5 set ekspresi sesuai enum Mood.
+  // Idle = happy.gif (set ke-5). Mood = 5 set ekspresi sesuai enum Mood.
   static uint8_t  whichNow = 0xFF;   // set yang sedang diputar
   static uint16_t frame = 0;
   static uint32_t last  = 0;
@@ -1793,10 +1803,10 @@ button{background:#3ddc97;color:#0b0b0b;border:0;font-weight:700}
 button.alt{background:#1c1c1c;color:#eee;border:1px solid #3a3a3a;font-weight:600}
 a{color:#3ddc97}
 </style>
-<img src="/mochi.gif?v=4" alt="animasi mochi dasai" width=256
+<img src="/mochi.gif?v=5" alt="animasi mochi dasai" width=256
      style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
 <p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
-  animasi mochi &middot; sleepy_3.gif &middot; <a href="/mochi.gif">buka GIF</a>
+  animasi mochi &middot; happy.gif &middot; <a href="/mochi.gif">buka GIF</a>
 </p>
 <h3>layar <span id=now>-</span></h3>
 <button id=next>Layar berikutnya</button>
@@ -2639,6 +2649,13 @@ static void setupWeb() {
     String s = web.arg("set");
     s.toLowerCase();
     Mood m = mood;
+    if (s == "idle") {                                 // kembali ke happy.gif
+      setIdle();
+      react = React::None;
+      screen = SCR_FACE;
+      web.send(200, "application/json", "{\"ok\":true,\"mood\":\"idle\"}");
+      return;
+    }
     if      (s == "senang" || s == "happy")            m = Mood::Happy;
     else if (s == "sedih"  || s == "sad")              m = Mood::Sad;
     else if (s == "marah"  || s == "angry")            m = Mood::Angry;
@@ -2815,7 +2832,7 @@ void setup() {
   oled.setBusClock(400000);
   oled.setContrast(180);
 
-  // Splash restart: animasi idle sleepy_3.gif (set ke-5). Full contrast.
+  // Splash restart: animasi idle happy.gif (set ke-5). Full contrast.
   for (int i = 0; i < 24; ++i) {
     oled.clearBuffer();
     oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H,
