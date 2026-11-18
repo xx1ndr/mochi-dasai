@@ -67,8 +67,24 @@ Catatan:
 | TTP223 | OUT | GPIO3 |
 | TTP223 | VCC | 3V3 |
 | TTP223 | GND | GND |
-| Buzzer | + | GPIO10 |
-| Buzzer | - | GND |
+| Buzzer | + | GPIO10 (wajib lewat transistor, lihat bawah) |
+| Buzzer | - | Kolektor transistor NPN |
+
+### Wiring buzzer (wajib transistor)
+
+GPIO ESP32-C3 maksimal ~20 mA, sedangkan buzzer aktif butuh ~20–30 mA.
+Kalau buzzer dicolok langsung ke GPIO, biasanya **tidak bunyi** walaupun kode sudah benar.
+Tes cepat: sentuh `+` buzzer ke 3V3 — kalau bunyi, berarti buzzer bagus dan yang kurang arusnya.
+
+```
+3V3  ──────> + buzzer
+               - buzzer ──> C  (kolektor NPN: 2N2222 / BC547 / S8050)
+IO10 ──[1kΩ]────────────> B  (base)
+GND  ───────────────────> E  (emitor)
+```
+
+Kalau tidak ada resistor 1kΩ, pakai 470Ω–2.2kΩ juga boleh.
+Kalau pakai MOSFET logic-level (AO3400, IRLZ44N), gate langsung ke IO10, source ke GND, drain ke `-` buzzer (resistor gate opsional).
 
 Kalau pin bentrok dengan kebutuhanmu, ubah di `include/config.h`.
 Di ESP32-C3 pin I2C/UART bebas dipilih, jadi susunan ini cuma kesepakatan:
