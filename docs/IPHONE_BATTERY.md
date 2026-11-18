@@ -14,13 +14,10 @@ ganti dengan IP LAN-nya (lihat layar **SISTEM** baris `ip ...` atau
 ESP32 sudah bisa tanya Telegram Bot API tiap 4 detik — tidak perlu PC, tidak
 perlu kabel, dan iPhone boleh pakai sinyal seluler.
 
-1. Buat bot lewat **@BotFather** → `/newbot`, lalu isi token di
-   `include/config.h`:
-   ```c
-   #define TELEGRAM_TOKEN "123456789:AAH..."
-   ```
-   Upload ulang firmware. (Wajib: ESP32 harus tersambung WiFi `WiFI_RUMAH` agar
-   punya internet.)
+1. Buat bot lewat **@BotFather** → `/newbot`. Isi token lewat halaman web ESP32
+   `http://192.168.4.1/` → bagian **bot Telegram** → **Simpan token**
+   (atau lewat kabel: `K<token>\n`). Tersimpan di NVS, tidak perlu upload ulang.
+   Wajib: ESP32 harus tersambung WiFi `WiFI_RUMAH` agar punya internet.
 2. Di Telegram, buka bot kamu dan tekan **Start**.
 3. Di Shortcuts, tambahkan aksi **Kirim Pesan** Telegram → penerima = bot kamu,
    pesan:

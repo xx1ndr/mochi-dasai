@@ -210,6 +210,7 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 | `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`) |
 | `/feed` | kasih makan (langsung tampil animasi "Nyam") |
 | `/battery?level=85&charging=1` | set baterai iPhone (0–100, `charging` 0/1) |
+| `/telegram?token=...` | simpan token bot Telegram di NVS (`?clear=1` = hapus) |
 
 Cukup buka `http://192.168.4.1/` di Safari/Chrome HP, tombolnya sudah ada di sana
 (termasuk tombol mood dan Kasih makan). Notifikasi baru tetap langsung muncul di
@@ -350,15 +351,16 @@ Tidak butuh PC menyala dan tidak butuh bridge — ESP32 langsung tanya
 Telegram Bot API.
 
 1. Chat **@BotFather** di Telegram -> `/newbot` -> ikuti langkahnya.
-2. Salin token ke `include/config.h`:
+2. Masukkan token lewat halaman web ESP32 `http://192.168.4.1/`, bagian
+   **bot Telegram** → kolom token → **Simpan token**. Tersimpan di NVS, jadi
+   tidak perlu edit `config.h` atau upload ulang. Bisa juga lewat kabel:
+   `K<token>\n`. Token tidak pernah dikirim balik ke browser/log.
+3. Buka Telegram, cari bot kamu, tekan **Start**, lalu kirim pesan. Pesan akan
+   muncul di layar **PESAN** dengan tag `[TG]`, plus bunyi buzzer (kalau
+   buzzer dipasang).
 
-   ```c
-   #define TELEGRAM_TOKEN "123456789:AAH..."
-   ```
-
-3. Upload ulang. Buka Telegram, cari bot kamu, tekan **Start**, lalu kirim pesan.
-   Pesan akan muncul di layar **PESAN** dengan tag `[TG]`, plus bunyi buzzer
-   (kalau buzzer dipasang).
+> ESP32 harus tersambung WiFi yang bisa internet (`WiFI_RUMAH`) agar `getUpdates`
+> jalan. Tanpa itu bot tetap tersimpan tapi tidak menerima pesan.
 
 Catatan:
 - Bot hanya menerima chat pribadi yang mengirim pesan ke dia. Untuk grup,

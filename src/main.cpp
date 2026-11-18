@@ -697,7 +697,22 @@ static void mqttTask() {
 }
 
 // ------------------------------------------------------------ Telegram
-static bool telegramEnabled() { return strlen(TELEGRAM_TOKEN) > 20; }
+// Token bisa diisi dari web (/telegram?token=...) dan disimpan di NVS.
+static char     tgToken[96] = TELEGRAM_TOKEN;
+static uint32_t tgGen       = 0;     // naik tiap token diganti -> reset polling
+
+static bool telegramEnabled() { return strlen(tgToken) > 20; }
+
+static void setTelegramToken(const char* tok) {
+  if (!tok) return;
+  size_t n = strlen(tok);
+  if (n > sizeof(tgToken) - 1) n = sizeof(tgToken) - 1;
+  memcpy(tgToken, tok, n);
+  tgToken[n] = 0;
+  tgGen++;
+  prefs.putString("tgtok", tgToken);
+  Serial.printf("[tg] token disimpan (%zu char)\n", n);
+}
 
 /*
  *  Long polling ringan: tiap 4 detik tanya getUpdates (timeout=0, koneksi
@@ -715,6 +730,14 @@ static void telegramTask() {
   static WiFiClientSecure tls;
   static HTTPClient http;
   static bool     tlsInit = false;
+  static uint32_t seenGen = 0;
+
+  if (seenGen != tgGen) {              // token baru -> buang state lama
+    seenGen = tgGen;
+    offset = 0; primed = false; wait = 4000; lastTry = 0;
+    if (tlsInit) { http.end(); tls.stop(); }
+    tlsInit = false;
+  }
 
   uint32_t now = millis();
   if (lastTry != 0 && now - lastTry < wait) return;
@@ -731,7 +754,7 @@ static void telegramTask() {
   char url[200];
   snprintf(url, sizeof(url),
            "https://api.telegram.org/bot%s/getUpdates?timeout=0&limit=10&offset=%ld",
-           TELEGRAM_TOKEN, primed ? offset : -1L);
+           tgToken, primed ? offset : -1L);
 
   if (!http.begin(tls, url)) return;
   int code = http.GET();
@@ -1531,6 +1554,7 @@ static void updateButton() {
 //   G<lat>|<lon>\n                    lokasi cuaca dari PC
 //   M<0..4>\n                         ganti mood (0 Senang ... 4 Lapar)
 //   B<level>|<0/1>\n                 baterai iPhone (%) + status mengisi
+//   K<token>\n                       token bot Telegram (disimpan di NVS)
 static void handleSerialLine(const char* line) {
   char kind = line[0];
   const char* p = line + 1;
@@ -1579,6 +1603,11 @@ static void handleSerialLine(const char* line) {
     const char* c = bar ? bar + 1 : "";
     bool chg = atoi(c) > 0 || *c == 't' || *c == 'T' || *c == 'y' || *c == 'Y';
     setPhoneBattery(lvl, chg);
+    return;
+  }
+
+  if (kind == 'K' || kind == 'k') {
+    setTelegramToken(p);
     return;
   }
 
@@ -1716,6 +1745,18 @@ a{color:#3ddc97}
   </select>
   <button>Kirim baterai</button>
 </form>
+<h3>bot Telegram <span id=tgNow>-</span></h3>
+<p style="font-size:12px;color:#888;margin:0 0 6px">
+  Token dari @BotFather. Tanpa ini, notifikasi Telegram &amp; perintah
+  <code>#batt</code> tidak aktif. Butuh WiFi ESP32 yang bisa internet.
+</p>
+<form onsubmit="event.preventDefault();
+  fetch('/telegram?token='+encodeURIComponent(tg.value))
+  .then(r=>r.json()).then(d=>{tg.value='';tgUpd()})">
+  <input id=tg type=password placeholder="token: 123456789:AAH...">
+  <button>Simpan token</button>
+</form>
+<button class=alt onclick="fetch('/telegram?clear=1').then(r=>r.json()).then(()=>tgUpd())">Hapus token</button>
 <h3>lokasi cuaca</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
   Cuaca mengikuti GPS modul, lalu lokasi HP (otomatis saat halaman ini dibuka),
@@ -1787,6 +1828,9 @@ function locUpd(){fetch('/location').then(r=>r.json()).then(l=>{$('locNow').text
 function battUpd(){fetch('/battery').then(r=>r.json()).then(b=>{
   $('battNow').textContent = b.level<0 ? '-' : b.level+'% '+(b.charging?'(mengisi)':'');
 })}
+function tgUpd(){fetch('/telegram').then(r=>r.json()).then(t=>{
+  $('tgNow').textContent = t.active ? 'aktif' : '-';
+})}
 function navUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
   const g=s.gps||{};
   $('routeInfo').textContent = s.route_active
@@ -1834,7 +1878,7 @@ $('feed').onclick=()=>fetch('/feed').then(upd);
 function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
 syncClock(); setInterval(syncClock, 60000);
 $('autoLoc').checked = localStorage.getItem('mochiAutoLoc') !== '0';
-upd(); locUpd(); navUpd(); battUpd();
+upd(); locUpd(); navUpd(); battUpd(); tgUpd();
 if($('autoLoc').checked) locateNow();
 setInterval(()=>{ if($('autoLoc').checked) locateNow() }, 600000);
 setInterval(navUpd, 3000);
@@ -2365,6 +2409,25 @@ static void setupWeb() {
     web.send(200, "application/json", out);
   });
 
+  // token bot Telegram: /telegram?token=...  atau /telegram?clear=1
+  // Token tidak dikirim kembali ke browser ( hanya panjangnya ).
+  web.on("/telegram", HTTP_GET, []() {
+    if (web.hasArg("clear")) {
+      tgToken[0] = 0; tgGen++;
+      prefs.remove("tgtok");
+      Serial.println("[tg] token dihapus");
+    } else if (web.hasArg("token")) {
+      String t = web.arg("token");
+      t.trim();
+      if (t.length() >= 20) setTelegramToken(t.c_str());
+    }
+    char out[80];
+    snprintf(out, sizeof(out),
+             "{\"ok\":true,\"active\":%s,\"len\":%zu}",
+             telegramEnabled() ? "true" : "false", strlen(tgToken));
+    web.send(200, "application/json", out);
+  });
+
   // kontrol mood / kasih makan dari web: /mood?set=marah , /feed
   web.on("/mood", HTTP_GET, []() {
     String s = web.arg("set");
@@ -2501,6 +2564,15 @@ void setup() {
       phoneCharging = nvsGet("battchg", 0) != 0;
       phoneBattAt   = 0;
     }
+  }
+
+  // Token Telegram dari web (kalau belum ada, pakai nilai di config.h).
+  {
+    String saved = prefs.getString("tgtok", "");
+    if (saved.length() >= 20) {
+      snprintf(tgToken, sizeof(tgToken), "%s", saved.c_str());
+    }
+    if (telegramEnabled()) Serial.println("[tg] aktif (token dari NVS/config)");
   }
 
   // Lokasi cuaca yang pernah diset dari web (dipakai kalau GPS tidak fix).
