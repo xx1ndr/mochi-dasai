@@ -134,11 +134,13 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
 ## 4. Cara pakai
 
-- Layar pertama = **wajah mochi**: animasi **asli DASAI**, 90 frame bitmap
-  128x64 (frame-nya di `include/dasai_frames.h`). Cara mainnya mengikuti
- web The Mochi: potongan ekspresi acak diputar 16 fps, lalu ada jeda
-  acak 0,8–5 detik sebelum ekspresi berikutnya. Di web, GIF versi sama bisa
-  dilihat/diunduh di `http://192.168.1.8/mochi.gif`.
+- Layar pertama = **animasi mochi** dari GIF `mi_bef.gif` yang diberikan:
+  77 frame bitmap 128x64 diputar berurutan dengan delay aslinya (60–70 ms
+  per frame, ≈15 fps). Tidak ada potongan acak atau jeda lama, jadi geraknya
+  mengalir mulus. Frame OLED ada di `include/mochi_frames.h`, GIF aslinya di
+  `include/mochi_web_gif.h`. Di web bisa dilihat/diunduh di
+  `http://192.168.1.8/mochi.gif`. Mood hanya tampil sebagai ikon + label kecil
+  di sudut kiri atas — karakter tetap utuh (tidak digambar ulang).
 - **ESP32 membuat hotspot sendiri** — tidak perlu router:
 
   | | |
@@ -198,7 +200,7 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 | `/face?frame=45` | diagnosa: diamkan animasi DASAI di satu frame |
 | `/face?auto=1` | lanjutkan animasi wajah normal |
 | `/maps` (atau `/map`) | monitor GPS: peta Google Maps live + marker, auto-refresh 3 detik |
-| `/mochi.gif` | animasi mochi 90 frame dengan ekspresi + jeda acak |
+| `/mochi.gif` | animasi mochi 77 frame dari `mi_bef.gif` (sama dengan OLED) |
 | `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`) |
 | `/feed` | kasih makan (langsung tampil animasi "Nyam") |
 
@@ -273,18 +275,23 @@ npm start
 `C:\Program Files\Google\Chrome\Application\chrome.exe` (Lewati unduhan Chromium
 Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
 
-`bridge.js` sudah berisi `ESP_IP = 192.168.1.8` (IP LAN ESP32 yang sedang
-dipakai). Kalau IP berubah karena DHCP, timpa tanpa mengedit file:
+**Notifikasi dikirim lewat KABEL USB (serial), bukan WiFi.** `bridge.js`
+membuka port `COM8` (115200 baud) dan menulis `N<pengirim>|<pesan>\n` untuk
+tiap pesan WhatsApp masuk. Firmware menerimanya di `updateSerialInput()` lalu
+memunculkan notifikasi `WA` di OLED + badge `MSG n`. Jadi ESP32 tidak perlu
+join WiFi yang sama dengan PC agar notifikasi WA muncul. Kalau port beda:
 
 ```bash
-set ESP_IP=192.168.1.99 && npm start   # Windows CMD
-$env:ESP_IP="192.168.1.99"; npm start  # PowerShell
+set ESP_PORT=COM3 && npm start   # Windows CMD
+$env:ESP_PORT="COM3"; npm start  # PowerShell
 ```
+
+> Port COM8 harus bebas saat bridge jalan. Kalau mau upload firmware, matikan
+> bridge dulu (`Ctrl+C`), karena Arduino CLI butuh port yang sama.
 
 Scan QR yang muncul di terminal (WhatsApp > Perangkat tertaut). Kalau karakter
 QR berantakan di terminal Windows, buka file `bridge/qr.txt` dan scan isinya
-dengan aplikasi QR scanner. Setelah itu setiap pesan masuk otomatis diteruskan
-ke `http://192.168.1.8/notify`. Sesi login disimpan di folder `bridge/session`,
+dengan aplikasi QR scanner. Sesi login disimpan di folder `bridge/session`,
 jadi tidak perlu scan QR tiap kali.
 
 > **Bridge nyangkut / timeout di `Client.inject`?**
@@ -356,34 +363,30 @@ Catatan:
 
 ## 8. Batasan & ide lanjutan
 
-- C3 single core, tanpa PSRAM: animasi wajah 16 fps (`FACE_FRAME_MS 60`), layar lain 10 fps supaya bus I2C tidak penuh.
+- C3 single core, tanpa PSRAM: animasi wajah ±15 fps (delay 60/70 ms dari GIF), layar lain 10 fps supaya bus I2C tidak penuh.
 - Cuaca: Open-Meteo (gratis, tanpa API key), update tiap 10 menit.
 - GPS: kecepatan, satelit, HDOP, altitude, jarak tempuh (trip).
 - Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
   tombol fisik supaya tidak perlu buka HP untuk pindah layar.
 
-### Animasi wajah (frame asli DASAI)
+### Animasi wajah (dari GIF `mi_bef.gif`)
 
-Wajahnya bukan gambar ulang — ini **90 frame bitmap 128x64 dari animasi RIVE
-resmi** DASAI (diekspor oleh [upir](https://github.com/upiir/esp32s3_oled_dasai_mochi),
-format image2cpp), disimpan di `include/dasai_frames.h` sebagai PROGMEM
-(92 KB, aman untuk partisi Huge APP).
+Animasi OLED memakai **77 frame 128x64 1-bit** yang dikonversi dari GIF
+`mi_bef.gif` (320x180, background hitam). Frame disimpan di
+`include/mochi_frames.h` sebagai PROGMEM (~79 KB). Delay tiap frame mengikuti
+GIF aslinya (60/70 ms) dan disimpan di `MOCHI_DELAYS`. GIF mentahnya juga
+disematkan di `include/mochi_web_gif.h` supaya `/mochi.gif` menampilkan
+animasi yang sama di browser.
 
-Frame 0-12 itu fade in dan 59-89 fade out, jadi firmware hanya memutar frame
-13 sampai 58. Supaya mirip web The Mochi, firmware memilih **potongan acak**
-(6–14 frame), memutarnya bolak-balik, lalu **jeda acak 0,8–5 detik** sebelum
-memilih ekspresi berikutnya. Perilaku yang sama dipakai untuk GIF di
-`include/mochi_gif.h` / `/mochi.gif`.
+Field DASAI 90 frame (`include/dasai_frames.h`) tetap ada untuk diagnosa
+`/face?frame=N`, tapi tidak dipakai sebagai animasi utama.
 
 | Mau ubah | Di mana |
 |---|---|
-| kecepatan animasi | `FACE_FRAME_MS` di `include/config.h` — 60 = 16 fps, 40 = 25 fps |
-| panjang ekspresi & jeda | `pickExpression()` di `drawFace()` (`src/main.cpp`) |
-| rentang frame | `FACE_LOOP_FIRST` / `FACE_LOOP_LAST` di `src/main.cpp` |
-| ganti frame animasi | generate ulang `include/dasai_frames.h` (jangan edit manual) |
-| generate ulang GIF | script `make_gif_random.py` (butuh Python + Pillow) |
-
-Kalau animasi terasa patah-patah, naikkan `FACE_FRAME_MS` ke 50.
+| ganti GIF animasi | taruh GIF baru, lalu jalankan `powershell -File tools\make_mochi_frames.ps1 -Gif <path>` |
+| crop / threshold | parameter `-CropX -CropY -CropW -CropH -Threshold` di script tersebut |
+| kecepatan animasi | `MOCHI_DELAYS` di `include/mochi_frames.h` (dalam ms) |
+| mood / ekspresi kecil | `drawMoodBadge()` di `src/main.cpp` |
 
 ### Navigasi otomatis (turn-by-turn)
 

@@ -1,35 +1,71 @@
-// Bridge WhatsApp -> mochi dasai
+// Bridge WhatsApp -> mochi dasai, lewat KABEL USB (serial COM8).
 //
 // Cara pakai:
 //   1) npm install
-//   2) set ESP_IP (ip ESP32 atau mochi-01.local)
-//   3) npm start   lalu scan QR dari WhatsApp di HP
+//   2) colokkan ESP32 ke PC (port COM8, bisa ditimpa: ESP_PORT=COM3 npm start)
+//   3) npm start   lalu scan QR dari WhatsApp di HP (sekali saja)
 //
-// PERINGATAN: whatsapp-web.js adalah library tidak resmi.
-// Nomor yang dipakai bisa kena ban oleh WhatsApp. Pakai nomor cadangan.
-// Kalau tidak mau risiko, pakai MacroDroid (Android) -> HTTP request ke ESP32.
+// Format yang dikirim ke firmware:  N<pengirim>|<pesan>\n
+// Firmware menerimanya di updateSerialInput() lalu memunculkan notifikasi WA.
+// Tidak perlu WiFi / IP sama sekali untuk notifikasi.
 
 const fs = require('fs');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const { SerialPort } = require('serialport');
 
-// IP LAN ESP32-C3 (dibaca dari Serial Monitor saat boot). Bisa ditimpa lewat
-// env: ESP_IP=192.168.1.xx npm start
-const ESP_IP        = process.env.ESP_IP || '192.168.1.8';
+const ESP_PORT     = process.env.ESP_PORT || 'COM8';
+const BAUD         = 115200;
 const IGNORE_GROUPS = process.env.IGNORE_GROUPS === '1';
 const IGNORE_SELF   = process.env.IGNORE_SELF !== '0';
 
 // Pakai Chrome yang sudah terpasang di PC (Puppeteer tidak perlu download Chromium).
-// Ubah path ini kalau Chrome-mu di lokasi lain, atau hapus baris executablePath
-// kalau puppeteer sudah berhasil mengunduh browser sendiri.
 const CHROME_PATH = process.env.CHROME_PATH ||
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
+// ---------------- koneksi serial ke ESP32 ----------------
+let esp = null;
+
+function bukaSerial() {
+  if (esp && esp.isOpen) return;
+  try {
+    esp = new SerialPort({
+      path: ESP_PORT,
+      baudRate: BAUD,
+      autoOpen: true,
+      dtr: false,
+      rts: false,           // jangan toggle DTR/RTS (bisa reset ESP32)
+    });
+    esp.on('open', () => console.log(`[serial] terhubung ${ESP_PORT} @ ${BAUD}`));
+    esp.on('error', (e) => console.error(`[serial] ${e.message}`));
+    esp.on('close', () => console.error('[serial] terputus'));
+  } catch (e) {
+    console.error('[serial] gagal buka:', e.message);
+  }
+}
+
+bukaSerial();
+// Buka ulang otomatis kalau kabel dicolok lagi / port sempat error.
+setInterval(() => { if (!esp || !esp.isOpen) bukaSerial(); }, 3000);
+
+function kirimKeEsp(from, text) {
+  if (!esp || !esp.isOpen) {
+    console.error('[serial] port belum terbuka, pesan dilewatkan');
+    return;
+  }
+  // Bersihkan karakter yang dipakai firmware sebagai pemisah / akhir baris.
+  const f = String(from).replace(/[\r\n|]/g, ' ').slice(0, 60);
+  const t = String(text).replace(/[\r\n|]/g, ' ').slice(0, 120);
+  esp.write(`N${f}|${t}\n`, (err) => {
+    if (err) console.error('[serial] gagal kirim:', err.message);
+    else console.log(`[wa] ${f}: ${t} -> ${ESP_PORT}`);
+  });
+}
+
+// ---------------- WhatsApp ----------------
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './session' }),
-  // WhatsApp Web kadang lama load di PC yang internetnya lambat.
   authTimeoutMs: 120000,
-  // Pakai UA Chrome asli (bukan default library yang sudah tahun 2022).
   userAgent: false,
   puppeteer: {
     headless: true,
@@ -62,7 +98,7 @@ client.on('authenticated', () => {
 });
 
 client.on('ready', () => {
-  console.log(`[wa] siap. mengirim notifikasi ke http://${ESP_IP}/notify`);
+  console.log(`[wa] siap. notifikasi dikirim lewat kabel ${ESP_PORT}`);
 });
 
 client.on('disconnected', (reason) => {
@@ -83,15 +119,7 @@ client.on('message', async (msg) => {
   } catch (_) {}
 
   const text = (msg.body || '').trim().slice(0, 120) || '[media / stiker]';
-
-  try {
-    const url = `http://${ESP_IP}/notify?from=${encodeURIComponent(from)}` +
-                `&text=${encodeURIComponent(text)}`;
-    const res = await fetch(url);
-    console.log(`[wa] ${from}: ${text} -> ${res.status}`);
-  } catch (err) {
-    console.error('[wa] gagal kirim ke ESP32:', err.message);
-  }
+  kirimKeEsp(from, text);
 });
 
 client.initialize();

@@ -29,8 +29,9 @@
 #include <string.h>
 
 #include "../include/config.h"
-#include "../include/dasai_frames.h"   // 90 frame animasi mochi asli (PROGMEM)
-#include "../include/mochi_gif.h"      // GIF 90 frame untuk halaman web
+#include "../include/dasai_frames.h"   // 90 frame animasi DASAI asli (PROGMEM)
+#include "../include/mochi_frames.h"   // 77 frame dari GIF mi_bef (animasi OLED)
+#include "../include/mochi_web_gif.h"  // GIF asli untuk endpoint /mochi.gif
 
 // ------------------------------------------------------------ objek global
 // clock/data ikut diberikan supaya U8g2 memakai pin I2C dari config.h
@@ -832,7 +833,7 @@ static uint32_t faceBlendUntil = 0;
 
 static uint8_t faceModeNow() {
   if (faceFrozen >= 0) return 3;                     // frame diagnosa
-  return 0;                                          // selalu animasi DASAI
+  return 0;                                          // selalu animasi dari GIF
 }
 
 // Crossfade 1-bit memakai pola Bayer 4x4 supaya tidak ada garis-garis.
@@ -901,19 +902,13 @@ static void drawMoodBadge(uint32_t now) {
   oled.drawStr(10, 6, label);
 }
 static void drawFace() {
-  // Ekspresi acak: ambil potongan 6..14 frame dari 13..58, putar bolak-balik,
-  // lalu diam selama 0.8..5 detik sebelum memilih potongan baru.
-  static int      exprFirst = FACE_LOOP_FIRST;
-  static int      exprLast  = FACE_LOOP_FIRST;
-  static int      exprPos   = FACE_LOOP_FIRST;
-  static int      exprDir   = 1;
-  static bool     holding   = false;
-  static bool     started   = false;
-  static uint32_t holdUntil = 0;
-  static uint32_t last      = 0;
+  // Animasi dari GIF mi_bef: 77 frame, delay aslinya 60/70 ms, diputar urut.
+  // Frame dikonversi ke 128x64 1-bit (tools/make_mochi_frames.ps1).
+  static uint16_t frame = 0;
+  static uint32_t last  = 0;
   uint32_t now = millis();
 
-  // habis reaksi, kembalikan ke wajah DASAI kalau mood-nya Senang
+  // habis reaksi, kembalikan ke animasi kalau mood-nya Senang
   if (react != React::None && now >= reactUntil) react = React::None;
 
   if (faceFrozen >= 0) {
@@ -922,41 +917,15 @@ static void drawFace() {
     return;
   }
 
-  auto pickExpression = [&]() {
-    uint32_t r = esp_random();
-    int len = 6 + (int)(r % 9);                  // 6..14 frame
-    int maxFirst = FACE_LOOP_LAST - len;
-    exprFirst = FACE_LOOP_FIRST +
-                (int)((r >> 8) % (uint32_t)(maxFirst - FACE_LOOP_FIRST + 1));
-    exprLast = exprFirst + len;
-    exprPos  = exprFirst;
-    exprDir  = 1;
-    holding  = false;
-    last     = now;
-  };
-
-  if (!started) { started = true; pickExpression(); }
-
-  if (holding) {
-    if (now >= holdUntil) pickExpression();
-  } else if (now - last >= FACE_FRAME_MS) {
-    uint8_t steps = (uint8_t)((now - last) / FACE_FRAME_MS);
-    if (steps > 4) steps = 4;                   // jangan loncat jauh setelah jeda
+  uint16_t delay = pgm_read_word(&MOCHI_DELAYS[frame]);
+  if (now - last >= delay) {
+    uint32_t steps = (now - last) / delay;
+    if (steps > 8) steps = 8;                   // kejar waktu setelah jeda panjang
     last = now;
-    while (steps--) {
-      exprPos += exprDir;
-      if (exprPos >= exprLast) { exprPos = exprLast; exprDir = -1; }
-      if (exprDir < 0 && exprPos <= exprFirst) {
-        exprPos = exprFirst;
-        holding = true;
-        holdUntil = now + 800UL + (esp_random() % 4200UL); // delay 0.8..5 dtk
-        break;
-      }
-    }
+    frame = (frame + steps) % MOCHI_FRAME_COUNT;
   }
 
-  oled.drawXBMP(0, 0, DASAI_FRAME_W, DASAI_FRAME_H,
-                dasaiFrame((uint8_t)exprPos));
+  oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(frame));
   drawMoodBadge(now);
 }
 
@@ -1438,12 +1407,39 @@ static void updateButton() {
   }
 }
 
-// Serial Monitor jadi pengganti sensor untuk tes: 's' = sentuh pendek, 'l' = tahan.
+// Serial USB: 's' = sentuh pendek, 'l' = tahan (tes tanpa tombol).
+// Notifikasi dari bridge WA lewat kabel:  N<pengirim>|<pesan>\n
 static void updateSerialInput() {
+  static char  inFrom[sizeof(inbox[0].from)];
+  static char  inText[sizeof(inbox[0].text)];
+  static uint8_t nFrom = 0, nText = 0;
+  static bool  inNotif = false, inTextMode = false;
+
   while (Serial.available()) {
     char c = (char)Serial.read();
-    if (c == 's' || c == 'S') onShortPress();
-    else if (c == 'l' || c == 'L') onLongPress();
+
+    if (!inNotif) {
+      if (c == 'N' || c == 'n') {
+        inNotif = true; inTextMode = false; nFrom = nText = 0;
+      } else if (c == 's' || c == 'S') onShortPress();
+      else if (c == 'l' || c == 'L') onLongPress();
+      continue;
+    }
+
+    if (c == '\n' || c == '\r') {
+      if (nFrom || nText) {
+        inFrom[nFrom] = 0;
+        inText[nText] = 0;
+        addNotification("WA", inFrom, inText);
+      }
+      inNotif = false; inTextMode = false; nFrom = nText = 0;
+    } else if (c == '|' && !inTextMode) {
+      inTextMode = true;
+    } else if (inTextMode) {
+      if (nText < sizeof(inText) - 1) inText[nText++] = c;
+    } else {
+      if (nFrom < sizeof(inFrom) - 1) inFrom[nFrom++] = c;
+    }
   }
 }
 
@@ -1465,7 +1461,7 @@ a{color:#3ddc97}
 <img src="/mochi.gif" alt="animasi mochi dasai" width=256
      style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
 <p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
-  animasi DASAI asli &middot; 90 frame &middot; <a href="/mochi.gif">buka GIF</a>
+  animasi mochi &middot; 77 frame &middot; <a href="/mochi.gif">buka GIF</a>
 </p>
 <h3>layar <span id=now>-</span></h3>
 <button id=next>Layar berikutnya</button>
@@ -1882,10 +1878,10 @@ static void setupWeb() {
   web.on("/", HTTP_GET, []() { web.send_P(200, "text/html", PAGE_HTML); });
   web.on("/maps", HTTP_GET, []() { web.send_P(200, "text/html", MAP_HTML); });
   web.on("/map", HTTP_GET, []() { web.send_P(200, "text/html", MAP_HTML); });
-  // Animasi DASAI lengkap (90 frame) dalam satu GIF, tanpa API/key eksternal.
+  // GIF animasi mochi (sama dengan yang dipakai di OLED).
   web.on("/mochi.gif", HTTP_GET, []() {
     web.sendHeader("Cache-Control", "public, max-age=86400");
-    web.send_P(200, "image/gif", (const char*)MOCHI_GIF, MOCHI_GIF_LEN);
+    web.send_P(200, "image/gif", (const char*)MOCHI_WEB_GIF, MOCHI_WEB_GIF_LEN);
   });
 
   // HP (iOS/Android) suka membuka halaman "login WiFi" sendiri. Semua
