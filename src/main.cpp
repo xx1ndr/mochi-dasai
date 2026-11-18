@@ -220,14 +220,32 @@ static const char* wxText(int code) {
   return "Cuaca tak dikenal";
 }
 
-static void beep() {
-  if (!HAS_BUZZER) return;
-  // buzzer aktif: cukup pulse. Kalau punya buzzer pasif, tone() tetap bunyi.
-  tone(PIN_BUZZ, 2600, 70);
+// Buzzer aktif butuh DC, pasif butuh frekuensi. Dua-duanya didukung.
+// Nyalakan semua pin uji sekaligus: mana pun yang dipakai, tetap bunyi.
+static const uint8_t BUZZ_PINS_ALL[BUZZ_PIN_COUNT] = BUZZ_PINS;
+static void buzzOn(uint16_t hz) {
+#if BUZZER_ACTIVE
+  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) digitalWrite(BUZZ_PINS_ALL[i], HIGH);
+#else
+  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) tone(BUZZ_PINS_ALL[i], hz ? hz : 2000);
+#endif
+}
+static void buzzOff() {
+#if BUZZER_ACTIVE
+  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) digitalWrite(BUZZ_PINS_ALL[i], LOW);
+#else
+  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) noTone(BUZZ_PINS_ALL[i]);
+#endif
 }
 
-// Notifikasi: dua nada naik supaya beda dari bunyi tombol/mood.
-// Non-blocking: dijadwalkan lewat state, tidak memakai delay().
+static void beep() {
+  if (!HAS_BUZZER) return;
+  buzzOn(2600);
+  delay(70);
+  buzzOff();
+}
+
+// Notifikasi: dua pulse supaya beda dari bunyi tombol/mood.
 static uint32_t notifyToneAt = 0;
 static uint8_t  notifyStep   = 0;
 
@@ -235,19 +253,23 @@ static void notifyBeep() {
   if (!HAS_BUZZER) return;
   notifyStep = 1;
   notifyToneAt = millis();
-  tone(PIN_BUZZ, 1800, 90);
+  buzzOn(1800);
 }
 
 static void notifyBeepTask() {
   if (!HAS_BUZZER || notifyStep == 0) return;
   uint32_t now = millis();
-  if (notifyStep == 1 && now - notifyToneAt >= 130) {
+  if (notifyStep == 1 && now - notifyToneAt >= 120) {
+    buzzOff();
     notifyStep = 2;
     notifyToneAt = now;
-    tone(PIN_BUZZ, 2400, 110);
-  } else if (notifyStep == 2 && now - notifyToneAt >= 200) {
+  } else if (notifyStep == 2 && now - notifyToneAt >= 60) {
+    buzzOn(2400);
+    notifyStep = 3;
+    notifyToneAt = now;
+  } else if (notifyStep == 3 && now - notifyToneAt >= 120) {
+    buzzOff();
     notifyStep = 0;
-    noTone(PIN_BUZZ);
   }
 }
 
@@ -1738,7 +1760,7 @@ a{color:#3ddc97}
 <img src="/mochi.gif" alt="animasi mochi dasai" width=256
      style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
 <p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
-  animasi mochi &middot; 77 frame &middot; <a href="/mochi.gif">buka GIF</a>
+  animasi mochi &middot; sleepy.gif &middot; <a href="/mochi.gif">buka GIF</a>
 </p>
 <h3>layar <span id=now>-</span></h3>
 <button id=next>Layar berikutnya</button>
@@ -1774,6 +1796,15 @@ a{color:#3ddc97}
   </select>
   <button>Kirim baterai</button>
 </form>
+<h3>buzzer <span id=buzzNow>(uji)</span></h3>
+<button class=alt onclick="fetch('/buzz?ms=700')">Bunyi 0.7 detik</button>
+<button class=alt onclick="fetch('/buzz?ms=2000')">Bunyi 2 detik</button>
+<button class=alt onclick="notifyBeepTest()">Bunyi notif (2 pulse)</button>
+<script>
+function notifyBeepTest(){
+  fetch('/buzz?ms=120').then(()=>setTimeout(()=>fetch('/buzz?ms=120'),180));
+}
+</script>
 <h3>bot Telegram <span id=tgNow>-</span></h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
   Token dari @BotFather. Tanpa ini, notifikasi Telegram &amp; perintah
@@ -2458,6 +2489,21 @@ static void setupWeb() {
     web.send(200, "application/json", out);
   });
 
+  // uji buzzer: /buzz?ms=600   (tanpa arg = 400ms)
+  web.on("/buzz", HTTP_GET, []() {
+    if (!HAS_BUZZER) {
+      web.send(200, "application/json", "{\"ok\":false,\"msg\":\"buzzer mati\"}");
+      return;
+    }
+    int ms = web.hasArg("ms") ? web.arg("ms").toInt() : 400;
+    if (ms < 50) ms = 50;
+    if (ms > 3000) ms = 3000;
+    buzzOn(2000);
+    delay(ms);
+    buzzOff();
+    web.send(200, "application/json", "{\"ok\":true,\"ms\":" + String(ms) + "}");
+  });
+
   // token bot Telegram: /telegram?token=...  atau /telegram?clear=1
   // Token tidak dikirim kembali ke browser ( hanya panjangnya ).
   web.on("/telegram", HTTP_GET, []() {
@@ -2642,8 +2688,10 @@ void setup() {
     pinMode(PIN_BTN, BTN_ACTIVE == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
   }
   if (HAS_BUZZER) {
-    pinMode(PIN_BUZZ, OUTPUT);
-    digitalWrite(PIN_BUZZ, LOW);
+    for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) {
+      pinMode(BUZZ_PINS_ALL[i], OUTPUT);
+      digitalWrite(BUZZ_PINS_ALL[i], LOW);
+    }
   }
 
   Wire.begin(PIN_SDA, PIN_SCL);
