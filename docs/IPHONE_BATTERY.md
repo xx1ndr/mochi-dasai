@@ -5,7 +5,7 @@ menampilkan persentase kecil di status bar. Data bisa dikirim dari iPhone lewat
 **Shortcuts/Pintasan**, atau manual lewat browser/kabel USB.
 
 IP yang dipakai contoh di bawah adalah `192.168.4.1` (AP fallback
-`mochi-dasai`, password `mochi1234`). Kalau ESP32 berhasil join WiFi `WiFI_RUMAH`,
+`mochi-dasai`, password `mochi1234`). Kalau ESP32 berhasil join WiFi `WiFi rumah`,
 ganti dengan IP LAN-nya (lihat layar **SISTEM** baris `ip ...` atau
 `/api/status`).
 
@@ -17,7 +17,7 @@ perlu kabel, dan iPhone boleh pakai sinyal seluler.
 1. Buat bot lewat **@BotFather** → `/newbot`. Isi token lewat halaman web ESP32
    `http://192.168.4.1/` → bagian **bot Telegram** → **Simpan token**
    (atau lewat kabel: `K<token>\n`). Tersimpan di NVS, tidak perlu upload ulang.
-   Wajib: ESP32 harus tersambung WiFi `WiFI_RUMAH` agar punya internet.
+   Wajib: ESP32 harus tersambung WiFi `WiFi rumah` agar punya internet.
 2. Di Telegram, buka bot kamu dan tekan **Start**.
 3. Di Shortcuts, tambahkan aksi **Kirim Pesan** Telegram → penerima = bot kamu,
    pesan:

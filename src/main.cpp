@@ -30,7 +30,7 @@
 #include <string.h>
 
 #include "../include/config.h"
-#include "../include/mochi_frames.h"   // 77 frame dari mi_bef.gif (satu-satunya animasi)
+#include "../include/mood_frames.h"    // 6 set frame: 5 mood + idle (sleepy_3.gif)
 #include "../include/mochi_web_gif.h"  // mi_bef.gif untuk endpoint /mochi.gif
 
 // ------------------------------------------------------------ objek global
@@ -939,14 +939,14 @@ static void drawStatusBar() {
 }
 
 // ------------------------------------------------------------ wajah mochi
-// Satu-satunya animasi: mi_bef.gif, 77 frame bitmap 128x64 1-bit dari
-// include/mochi_frames.h. Semua GIF lama (DASAI, mood, sleepy) sudah dihapus.
+// Animasi ada di include/mood_frames.h: 5 set mood + 1 set idle.
+// Idle = sleepy_3.gif, Ngantuk = embarrassed.gif (request user).
 
 static int16_t  faceFrozen = -1;   // >= 0 = tampilkan 1 frame saja (diagnosa /face)
 
 // ---- transisi halus antar wajah ----
 #define FACE_BLEND_MS 180
-static uint8_t facePrevBuf[MOCHI_FRAME_BYTES];  // snapshot frame sebelumnya (1024 byte)
+static uint8_t facePrevBuf[MOOD_FRAME_BYTES];  // snapshot frame sebelumnya (1024 byte)
 static uint32_t faceBlendUntil = 0;
 
 static uint8_t faceModeNow() {
@@ -968,12 +968,12 @@ static void blendFromPrev(uint32_t now) {
   uint8_t* buf = oled.getBufferPtr();
   if (!buf) return;
 
-  for (int y = 0; y < MOCHI_FRAME_H; ++y) {
-    for (int x = 0; x < MOCHI_FRAME_W; ++x) {
+  for (int y = 0; y < MOOD_FRAME_H; ++y) {
+    for (int x = 0; x < MOOD_FRAME_W; ++x) {
       int th = kBayer[(y & 3) * 4 + (x & 3)] * 17;  // 0..255
       if (th <= progress) continue;                 // pakai pixel baru
       // framebuffer u8g2 = vertikal, LSB di atas: byte = baris 8 px, bit = y%8
-      int idx = (y & ~7) * (MOCHI_FRAME_W / 8) + x;
+      int idx = (y & ~7) * (MOOD_FRAME_W / 8) + x;
       uint8_t mask = (uint8_t)(1u << (y & 7));
       if (facePrevBuf[idx] & mask) buf[idx] |= mask;
       else                         buf[idx] &= (uint8_t)~mask;
@@ -1026,7 +1026,8 @@ static void drawMoodBadge(uint32_t now) {
   oled.drawStr(10, 63, label);
 }
 static void drawFace() {
-  // Satu-satunya animasi: mi_bef.gif. Mood hanya label/status, bukan GIF.
+  // Idle = sleepy_3.gif (set ke-5). Mood = 5 set ekspresi sesuai enum Mood.
+  static uint8_t  whichNow = 0xFF;   // set yang sedang diputar
   static uint16_t frame = 0;
   static uint32_t last  = 0;
   uint32_t now = millis();
@@ -1035,30 +1036,37 @@ static void drawFace() {
   if (react != React::None && now >= reactUntil) react = React::None;
 
   if (faceFrozen >= 0) {
+    uint16_t cnt = pgm_read_word(&MOOD_FRAME_COUNTS[MOOD_IDLE_SET]);
     int16_t n = faceFrozen;
-    if (n >= MOCHI_FRAME_COUNT) n = MOCHI_FRAME_COUNT - 1;
-    oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame((uint16_t)n));
+    if (n >= cnt) n = cnt - 1;
+    oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H,
+                  moodFrame(MOOD_IDLE_SET, (uint16_t)n));
     return;
   }
 
-  if (faceStartFrame) {                 // lanjut dari splash tanpa loncat
-    frame = faceStartFrame;
+  uint8_t which = moodIdle ? MOOD_IDLE_SET : (uint8_t)mood;
+  if (which >= MOOD_GIF_COUNT) which = 0;
+  if (which != whichNow) {              // ganti ekspresi -> mulai dari frame 0
+    whichNow = which;
+    frame = faceStartFrame;             // 0 normal, atau lanjutan setelah splash
     faceStartFrame = 0;
     last = now;
   }
-  if (frame >= MOCHI_FRAME_COUNT) frame = 0;
 
-  uint16_t delay = (uint16_t)pgm_read_word(&MOCHI_DELAYS[frame]);
+  uint16_t cnt  = pgm_read_word(&MOOD_FRAME_COUNTS[which]);
+  uint16_t base = (uint16_t)(pgm_read_dword(&MOOD_FRAME_OFFSETS[which]) /
+                             MOOD_FRAME_BYTES);
+  uint16_t delay = (uint16_t)pgm_read_byte(&MOOD_DELAYS[base + frame]) * 10;
   if (delay == 0) delay = 70;
 
   if (now - last >= delay) {
     uint32_t steps = (now - last) / delay;
     if (steps > 8) steps = 8;                   // kejar waktu setelah jeda panjang
     last = now;
-    frame = (frame + steps) % MOCHI_FRAME_COUNT;
+    frame = (frame + steps) % cnt;
   }
 
-  oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(frame));
+  oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H, moodFrame(which, frame));
   drawMoodBadge(now);
 }
 
@@ -1491,7 +1499,7 @@ static void render() {
 
   // Simpan isi buffer terakhir SEBELUM clear, dipakai crossfade wajah.
   uint8_t* buf = oled.getBufferPtr();
-  if (buf) memcpy(facePrevBuf, buf, MOCHI_FRAME_BYTES);
+  if (buf) memcpy(facePrevBuf, buf, MOOD_FRAME_BYTES);
 
   uint8_t mode = (screen == SCR_FACE || screen == SCR_EAT) ? faceModeNow() : 255;
   static uint8_t prevMode = 255;
@@ -1785,10 +1793,10 @@ button{background:#3ddc97;color:#0b0b0b;border:0;font-weight:700}
 button.alt{background:#1c1c1c;color:#eee;border:1px solid #3a3a3a;font-weight:600}
 a{color:#3ddc97}
 </style>
-<img src="/mochi.gif?v=3" alt="animasi mochi dasai" width=256
+<img src="/mochi.gif?v=4" alt="animasi mochi dasai" width=256
      style="image-rendering:pixelated;display:block;margin:0 auto 6px;border-radius:12px">
 <p style="text-align:center;font-size:12px;color:#888;margin:0 0 12px">
-  animasi mochi &middot; mi_bef.gif &middot; <a href="/mochi.gif">buka GIF</a>
+  animasi mochi &middot; sleepy_3.gif &middot; <a href="/mochi.gif">buka GIF</a>
 </p>
 <h3>layar <span id=now>-</span></h3>
 <button id=next>Layar berikutnya</button>
@@ -2053,7 +2061,7 @@ static String urlEncode(const String& s) {
 static bool geocodePlace(const String& q, double& la, double& lo,
                          String& name, String& msg) {
   if (WiFi.status() != WL_CONNECTED) {
-    msg = "WiFi mati - sambungkan ESP32 ke WiFI_RUMAH";
+    msg = "WiFi mati - sambungkan ESP32 ke WiFi rumah";
     return false;
   }
 
@@ -2567,7 +2575,8 @@ static void setupWeb() {
     } else if (web.hasArg("frame")) {
       int n = web.arg("frame").toInt();
       if (n < 0) n = 0;
-      if (n >= MOCHI_FRAME_COUNT) n = MOCHI_FRAME_COUNT - 1;
+      int cnt = pgm_read_word(&MOOD_FRAME_COUNTS[MOOD_IDLE_SET]);
+      if (n >= cnt) n = cnt - 1;
       faceFrozen = n;
       screen = SCR_FACE;
     }
@@ -2806,11 +2815,11 @@ void setup() {
   oled.setBusClock(400000);
   oled.setContrast(180);
 
-  // Splash restart: animasi mochi dari mi_bef.gif (77 frame) -- yang dibuat
-  // sebelum kamu kirim GIF gift. Full contrast, tanpa efek redup/kedip.
+  // Splash restart: animasi idle sleepy_3.gif (set ke-5). Full contrast.
   for (int i = 0; i < 24; ++i) {
     oled.clearBuffer();
-    oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H, mochiFrame(i));
+    oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H,
+                  moodFrame(MOOD_IDLE_SET, (uint16_t)i));
     oled.sendBuffer();
     delay(60);
   }
@@ -2851,8 +2860,8 @@ void setup() {
     uint32_t t0 = micros();
     for (int i = 0; i < 8; ++i) {
       oled.clearBuffer();
-      oled.drawXBMP(0, 0, MOCHI_FRAME_W, MOCHI_FRAME_H,
-                    mochiFrame((uint16_t)i));
+      oled.drawXBMP(0, 0, MOOD_FRAME_W, MOOD_FRAME_H,
+                    moodFrame(MOOD_IDLE_SET, (uint16_t)i));
       oled.sendBuffer();
     }
     Serial.printf("[oled] 1 frame 128x64 = %lu ms -> maksimal %lu fps\n",

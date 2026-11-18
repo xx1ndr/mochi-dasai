@@ -3,6 +3,11 @@
 
 #include <WiFi.h>
 
+// Isi kredensial di sini HANYA di komputer lokal. Jangan commit password.
+// (Untuk firmware utama, taruh di include/config_local.h yang di-gitignore.)
+#define WIFI_SSID "NAMA_WIFI_KAMU"
+#define WIFI_PASS "PASSWORD_WIFI_KAMU"
+
 static const char* STATUS_NAMA(int s) {
   switch (s) {
     case WL_IDLE_STATUS:     return "IDLE";
@@ -58,12 +63,12 @@ void setup() {
     Serial.printf("  %-28s %4d dBm  ch%2d  %-10s %s\n",
                   WiFi.SSID(i).c_str(), (int)WiFi.RSSI(i), (int)WiFi.channel(i),
                   ENC_NAMA(WiFi.encryptionType(i)),
-                  WiFi.SSID(i) == "WiFI_RUMAH" ? "<== SSID di config" : "");
+                  WiFi.SSID(i) == WIFI_SSID ? "<== SSID di config" : "");
   }
   WiFi.scanDelete();
 
-  Serial.println("=== connect ke \"WiFI_RUMAH\" ===");
-  WiFi.begin("WiFI_RUMAH", "PASSWORD_WIFI");
+  Serial.printf("=== connect ke \"%s\" ===\n", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
   for (int i = 0; i < 25; ++i) {
     delay(1000);
     int st = (int)WiFi.status();

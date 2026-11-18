@@ -1,6 +1,17 @@
+# Kredensial lokal - JANGAN di-commit
+include/config_local.h
+
+# Arduino / build artifacts
+build/
 .pio/
 .vscode/
+*.elf
+*.bin
+*.o
+
+# Bridge WhatsApp: sesi & cache lokal (jangan pernah di-commit)
 bridge/node_modules/
-bridge/session/
 bridge/.wwebjs_cache/
+bridge/session/
 bridge/qr.txt
+bridge/*.log

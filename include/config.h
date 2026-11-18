@@ -6,11 +6,22 @@
 // ================================================================
 
 // ---------------- WiFi ----------------
-// Setelan ini dipakai ESP32 untuk nyambung ke router (opsional, buat internet:
-// jam NTP, cuaca, Telegram). Kalau router susah, biarkan saja — ESP32 tetap
-// bisa dipakai lewat hotspot sendiri (lihat bagian AP di bawah).
-#define WIFI_SSID "WiFI_RUMAH"
-#define WIFI_PASS "PASSWORD_WIFI"
+// Kredensial WiFi TIDAK disimpan di repo (repo ini public).
+// Isi file include/config_local.h (diabaikan git) dengan:
+//   #define WIFI_SSID "nama_wifi_kamu"
+//   #define WIFI_PASS "password_kamu"
+// Kalau file itu tidak ada, nilai di bawah dipakai (kosong = ESP32 hanya AP).
+#if defined(__has_include)
+#  if __has_include("config_local.h")
+#    include "config_local.h"
+#  endif
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS ""
+#endif
 
 // ---------------- Hotspot dari ESP32 (AP) ----------------
 // HP connect ke WiFi "mochi-dasai", lalu buka http://192.168.4.1

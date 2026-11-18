@@ -129,8 +129,14 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
 1. Buka sketch: `File > Open` -> `C:\mochi-dasai\arduino\mochi_dasai\mochi_dasai.ino`
 2. Edit `C:\mochi-dasai\include\config.h` (buka pakai Notepad / VS Code):
-   - `AP_SSID`, `AP_PASS` (hotspot dari ESP32)
-   - `WIFI_SSID`, `WIFI_PASS` (router, opsional), `TZ_STRING`, `TELEGRAM_TOKEN`
+   - `AP_SSID`, `AP_PASS` (hotspot dari ESP32), `TZ_STRING`, `TELEGRAM_TOKEN`
+   - **WiFi router:** jangan ditaruh di `config.h` (repo ini public). Buat file
+     `C:\mochi-dasai\include\config_local.h` (sudah diabaikan git) berisi:
+     ```c
+     #pragma once
+     #define WIFI_SSID "nama_wifi_kamu"
+     #define WIFI_PASS "password_wifi_kamu"
+     ```
 3. Klik **Upload** (ikon →).
 4. Kalau muncul `Failed to connect` / port hilang: tahan **BOOT**, tekan **RST**,
    lepas BOOT, lalu Upload lagi.
@@ -150,10 +156,11 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
 ## 4. Cara pakai
 
-- Layar pertama = **animasi `mi_bef.gif`** (77 frame, 128x64 1-bit, 60–70 ms
-  per frame, ≈15 fps). Animasi ini diputar terus, kapan pun, tidak berubah saat
-  mood dipilih. Mood tetap tersimpan dan tampil sebagai label kecil di sudut
-  kiri-bawah. GIF aslinya bisa dilihat/diunduh di `http://192.168.1.8/mochi.gif`.
+- Layar pertama = **animasi idle `sleepy_3.gif`** (75 frame 128x64 1-bit,
+  60–70 ms per frame, ≈15 fps). Saat mood dipilih, animasi berganti sesuai mood
+  (Ngantuk = `embarrassed.gif`). Mood tetap tersimpan dan tampil sebagai label
+  kecil di sudut kiri-bawah. GIF idle bisa dilihat di
+  `http://192.168.1.8/mochi.gif`.
 - **ESP32 membuat hotspot sendiri** — tidak perlu router:
 
   | | |
@@ -180,7 +187,7 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
   > Tanpa internet, cuaca & Telegram tidak jalan. `AP_ONLY` sudah `0`, jadi ESP32
   > jadi hotspot **dan** ikut WiFi rumah sekaligus. Isi `WIFI_SSID`/`WIFI_PASS`
-  > di `include/config.h` dengan WiFi 2.4 GHz yang dipakai PC bridge.
+  > di `include/config_local.h` dengan WiFi 2.4 GHz yang dipakai PC bridge.
 - `http://192.168.4.1/api/status` -> JSON status (layar aktif, `time`, `tz`,
   `wx_lat`/`wx_lon`, gps, cuaca, heap, dll) — cocok untuk cek jam & lokasi.
 - Bisa juga `http://mochi-01.local/` kalau mDNS jalan di jaringanmu.
@@ -318,7 +325,7 @@ Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
 - `B<level>|<0/1>\n` baterai iPhone (%) + status mengisi (juga bisa dari web).
 
 Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi
-ESP32 tidak perlu join WiFi `WiFI_RUMAH` supaya jam/cuaca/notif WA jalan. GPS tetap
+ESP32 tidak perlu join WiFi `WiFi rumah` supaya jam/cuaca/notif WA jalan. GPS tetap
 membaca modulnya sendiri (butuh fix satelit, taruh di luar ruangan); kalau tidak
 ada fix, layar GPS menampilkan lokasi yang dikirim PC lewat kabel. Kalau port
 bedanya:
@@ -368,7 +375,7 @@ Telegram Bot API.
    muncul di layar **PESAN** dengan tag `[TG]`, plus bunyi buzzer (kalau
    buzzer dipasang).
 
-> ESP32 harus tersambung WiFi yang bisa internet (`WiFI_RUMAH`) agar `getUpdates`
+> ESP32 harus tersambung WiFi yang bisa internet (`WiFi rumah`) agar `getUpdates`
 > jalan. Tanpa itu bot tetap tersimpan tapi tidak menerima pesan.
 
 Catatan:
@@ -416,25 +423,31 @@ Catatan:
 - Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
   tombol fisik supaya tidak perlu buka HP untuk pindah layar.
 
-### Animasi wajah (mi_bef.gif saja)
+### Animasi wajah (idle + mood)
 
-Layar wajah memakai **satu-satunya animasi**: `mi_bef.gif`, 77 frame bitmap
-128x64 1-bit di `include/mochi_frames.h` (PROGMEM). Diputar looping di
-`drawFace()` (`src/main.cpp`) dengan delay asli 60/70 ms per frame. Splash
-restart dan diagnosa `/face?frame=N` juga memakai frame ini.
+Frame ada di `include/mood_frames.h` (6 set × 75 frame, 128x64 1-bit, PROGMEM):
 
-File animasi lama sudah dihapus dari project: `dasai_frames.h` (DASAI asli 90
-frame), `mood_frames.h` (relaxed/happy/sedih/angry/sleepy/excited),
-`mochi_gif.h`, dan `tools/make_mood_frames.ps1`. Mood tetap bisa dipilih dan
-disimpan, tapi hanya memengaruhi label/status — tidak mengganti animasi.
+| Kondisi | GIF | Set |
+|---|---|---|
+| Idle (belum ada mood dipilih) | `sleepy_3.gif` | 5 |
+| Senang | `happy_2.gif` | 0 |
+| Sedih | `love.gif` | 1 |
+| Marah | `angry.gif` | 2 |
+| Ngantuk | `embarrassed.gif` | 3 |
+| Lapar | `excited_2.gif` | 4 |
 
-`include/mochi_web_gif.h` berisi `mi_bef.gif` untuk endpoint `/mochi.gif`.
+Diputar looping di `drawFace()` (`src/main.cpp`) dengan delay asli 60/70 ms per
+frame. Splash restart dan diagnosa `/face?frame=N` memakai set idle.
+
+File animasi lama (`dasai_frames.h`, `mochi_gif.h`, `mochi_frames.h`) sudah
+dihapus. `include/mochi_web_gif.h` berisi versi kecil `sleepy_3.gif` untuk
+endpoint `/mochi.gif`.
 
 | Mau ubah | Di mana |
 |---|---|
-| ganti animasi | `powershell -File tools\make_mochi_frames.ps1 -Gif <file.gif>` |
-| crop / threshold | parameter `-CropX -CropY -CropW -CropH -Threshold` di script tersebut |
-| kecepatan animasi | `MOCHI_DELAYS` di `include/mochi_frames.h` (dalam ms) |
+| ganti GIF mood/idle | edit `$gifs` di `tools/make_mood_frames.ps1`, lalu jalankan `powershell -File tools\make_mood_frames.ps1` |
+| crop / threshold | `-CropX -CropY -CropW -CropH -Threshold` di script tersebut |
+| kecepatan animasi | `MOOD_DELAYS` di `include/mood_frames.h` (unit 10 ms) |
 | label mood kecil | `drawMoodBadge()` di `src/main.cpp` |
 
 ### Navigasi otomatis (turn-by-turn)
@@ -458,7 +471,7 @@ mengakhiri rute.
 
 Rute diambil dari **OSRM** (`router.project-osrm.org`) dan geocoding dari
 **Nominatim** — keduanya gratis tanpa API key. Kalau server rute tidak bisa
-diajak bicara (WiFi belum join `WiFI_RUMAH`, internet mati, atau OSRM sibuk), firmware
+diajak bicara (WiFi belum join `WiFi rumah`, internet mati, atau OSRM sibuk), firmware
 otomatis memakai **panah kompas langsung ke tujuan** (8 arah + jarak + derajat),
 jadi navigasi tetap bisa dipakai. Tombol **Panah kompas (tanpa rute/GPS)**
 memaksa mode ini. Akurasi geocoding IP setingkat kota.
@@ -490,7 +503,7 @@ http://192.168.4.1/nav?kind=left&dist=200&road=Jl.%20Sudirman
 
 > Alamat: `192.168.4.1` saat ESP32 masuk AP fallback `mochi-dasai`
 > (password `mochi1234`) — HP/PC harus tersambung ke hotspot ini. Kalau ESP32
-> berhasil join WiFi `WiFI_RUMAH`, pakai IP LAN yang tampil di layar sistem
+> berhasil join WiFi `WiFi rumah`, pakai IP LAN yang tampil di layar sistem
 > (`ip ...`) atau di `/api/status`, misalnya `http://192.168.1.8/`.
 
 | Parameter | Isi |

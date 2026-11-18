@@ -19,7 +19,7 @@ const BAUD         = 115200;
 const IGNORE_GROUPS = process.env.IGNORE_GROUPS === '1';
 const IGNORE_SELF   = process.env.IGNORE_SELF !== '0';
 
-// Jam & cuaca juga dikirim lewat kabel (ESP32 tidak perlu WiFi WiFI_RUMAH).
+// Jam & cuaca juga dikirim lewat kabel (ESP32 tidak perlu WiFi WiFi rumah).
 const WX_LAT        = process.env.WX_LAT ? parseFloat(process.env.WX_LAT) : null;
 const WX_LON        = process.env.WX_LON ? parseFloat(process.env.WX_LON) : null;
 const DEFAULT_LAT   = -6.2000;   // Jakarta (sama dengan HOME_LAT di firmware)
