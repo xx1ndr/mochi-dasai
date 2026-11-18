@@ -53,13 +53,13 @@ static const char* MON_ID[] = {"Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
                                "Jul", "Agu", "Sep", "Okt", "Nov", "Des"};
 
 enum Screen : uint8_t {
-  SCR_FACE, SCR_HOME, SCR_GPS, SCR_WX, SCR_MSG, SCR_SYS,
+  SCR_FACE, SCR_HOME, SCR_GPS, SCR_WX, SCR_MSG, SCR_SYS, SCR_BATT,
   SCR_MENU, SCR_MOOD, SCR_EAT, SCR_COUNT
 };
 static Screen screen = SCR_FACE;
 
 static const char* SCREEN_NAME[] = {
-  "wajah", "jam", "gps", "cuaca", "notif", "sistem",
+  "wajah", "jam", "gps", "cuaca", "notif", "sistem", "baterai",
   "menu", "ubah mood", "makan"
 };
 
@@ -169,6 +169,11 @@ static double   routeLastLat = 0, routeLastLon = 0;
 static bool     apOk    = false;   // hasil WiFi.softAP()
 static uint32_t frameMs = 0;       // lama kirim 1 frame ke OLED
 
+// Baterai iPhone, dikirim Shortcuts lewat HTTP (atau lewat kabel: B<level>|<0/1>).
+static int8_t   phoneBatt     = -1;   // -1 = belum pernah ada data
+static bool     phoneCharging = false;
+static uint32_t phoneBattAt   = 0;
+
 // ------------------------------------------------------------ utilitas
 static bool localNow(struct tm* out) {
   time_t now = time(nullptr);
@@ -247,6 +252,17 @@ static void clearInbox() {
 static void nvsBegin() { prefs.begin("mochi", false); }
 static uint32_t nvsGet(const char* key, uint32_t def) { return prefs.getUInt(key, def); }
 static void nvsSet(const char* key, uint32_t val) { prefs.putUInt(key, val); }
+
+/* Simpan baterai HP. level -1 berarti "hapus data". */
+static void setPhoneBattery(int level, bool charging) {
+  if (level < 0 || level > 100) return;
+  phoneBatt     = (int8_t)level;
+  phoneCharging = charging;
+  phoneBattAt   = millis();
+  nvsSet("batt", (uint32_t)level);
+  nvsSet("battchg", charging ? 1u : 0u);
+  Serial.printf("[baterai] iPhone %d%% %s\n", level, charging ? "(mengisi)" : "");
+}
 
 // Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau GPS tidak fix.
 static void saveWxLocation(float lat, float lon) {
@@ -808,10 +824,17 @@ static void drawStatusBar() {
            mqtt.connected() ? " mq" : "");
   oled.drawStr(0, 63, b);
 
+  char u[10] = "";
   if (unreadCount) {
-    char u[10];
     snprintf(u, sizeof(u), "msg%u", (unsigned)unreadCount);
     oled.drawStr(127 - oled.getStrWidth(u), 63, u);
+  }
+  if (phoneBatt >= 0) {
+    char p[10];
+    snprintf(p, sizeof(p), "%d%%%s", (int)phoneBatt, phoneCharging ? "+" : "");
+    int px = 127 - oled.getStrWidth(p);
+    if (unreadCount) px -= oled.getStrWidth(u) + 4;
+    oled.drawStr(px, 63, p);
   }
 }
 
@@ -1234,6 +1257,57 @@ static void drawMsg() {
   }
 }
 
+static void drawBattery() {
+  char b[32];
+
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 9, "BATERAI HP");
+  oled.drawStr(127 - oled.getStrWidth("iPhone"), 9, "iPhone");
+
+  if (phoneBatt < 0) {
+    oled.setFont(u8g2_font_helvB14_tf);
+    oled.drawStr(0, 42, "-");
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(20, 42, "belum ada data");
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 62, "kirim lewat Shortcuts / /battery");
+    return;
+  }
+
+  snprintf(b, sizeof(b), "%d", (int)phoneBatt);
+  oled.setFont(u8g2_font_logisoso26_tn);
+  int w = oled.getStrWidth(b);
+  oled.drawStr(0, 40, b);
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(w + 4, 40, "%");
+
+  // ikon baterai: bingkai + isian sesuai level
+  const int bx = 90, by = 26, bw = 28, bh = 14;
+  oled.drawFrame(bx, by, bw, bh);
+  oled.drawBox(bx + bw + 1, by + 4, 3, 6);
+  int fill = (bw - 4) * (int)phoneBatt / 100;
+  if (fill > 0) oled.drawBox(bx + 2, by + 2, fill, bh - 4);
+  if (phoneCharging) {
+    // kilat kecil di atas ikon
+    oled.drawLine(bx + 16, by - 4, bx + 12, by + 1);
+    oled.drawLine(bx + 12, by + 1, bx + 16, by + 1);
+    oled.drawLine(bx + 16, by + 1, bx + 12, by + 6);
+  }
+
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(0, 53, phoneCharging ? "mengisi" : "tidak mengisi");
+  if (phoneBattAt == 0)
+    snprintf(b, sizeof(b), "tersimpan");
+  else {
+    uint32_t age = (millis() - phoneBattAt) / 1000;
+    if (age < 60)        snprintf(b, sizeof(b), "baru");
+    else if (age < 3600) snprintf(b, sizeof(b), "%lum lalu", (unsigned long)(age / 60));
+    else                 snprintf(b, sizeof(b), "%luh lalu", (unsigned long)(age / 3600));
+  }
+  oled.drawStr(127 - oled.getStrWidth(b), 53, b);
+  oled.drawStr(0, 63, "dari iPhone (WiFi / kabel)");
+}
+
 static void drawSys() {
   char b[48];
   int y = 21;
@@ -1321,6 +1395,7 @@ static void render() {
     case SCR_WX:   drawWx();   break;
     case SCR_MSG:  drawMsg();  break;
     case SCR_SYS:  drawSys();  break;
+    case SCR_BATT: drawBattery(); break;
     case SCR_MENU: drawMenuScreen(); break;
     case SCR_MOOD: drawMoodPicker(); break;
     case SCR_EAT:  drawFace(); break;   // wajah "Nyam"
@@ -1361,7 +1436,7 @@ static void onShortPress() {
       forceWeather = true;               // tap = segar cuaca
       break;
     default:
-      screen = (Screen)(((int)screen + 1) % (SCR_SYS + 1));
+      screen = (Screen)(((int)screen + 1) % (SCR_BATT + 1));
       if (screen == SCR_MSG) markAllRead();
       break;
   }
@@ -1445,6 +1520,7 @@ static void updateButton() {
 //   W<temp>|<rh>|<feels>|<wind>|<code>\n  cuaca dari PC
 //   G<lat>|<lon>\n                    lokasi cuaca dari PC
 //   M<0..4>\n                         ganti mood (0 Senang ... 4 Lapar)
+//   B<level>|<0/1>\n                 baterai iPhone (%) + status mengisi
 static void handleSerialLine(const char* line) {
   char kind = line[0];
   const char* p = line + 1;
@@ -1484,6 +1560,15 @@ static void handleSerialLine(const char* line) {
       react = React::None;
       goFace();
     }
+    return;
+  }
+
+  if (kind == 'B' || kind == 'b') {
+    int lvl = atoi(p);
+    const char* bar = strchr(p, '|');
+    const char* c = bar ? bar + 1 : "";
+    bool chg = atoi(c) > 0 || *c == 't' || *c == 'T' || *c == 'y' || *c == 'Y';
+    setPhoneBattery(lvl, chg);
     return;
   }
 
@@ -1606,6 +1691,21 @@ a{color:#3ddc97}
   <input id=t value="Halo dari browser">
   <button>Kirim</button>
 </form>
+<h3>baterai iPhone <span id=battNow>-</span></h3>
+<p style="font-size:12px;color:#888;margin:0 0 6px">
+  Otomatis dari iPhone lewat Shortcuts (cara pasang di README). Bisa juga isi
+  manual di sini untuk mencoba.
+</p>
+<form onsubmit="event.preventDefault();
+  fetch('/battery?level='+encodeURIComponent(bl.value)+'&charging='+encodeURIComponent(bc.value))
+  .then(r=>r.json()).then(()=>battUpd())">
+  <input id=bl type=number min=0 max=100 value=85 placeholder="level 0-100">
+  <select id=bc>
+    <option value=0>tidak mengisi</option>
+    <option value=1>mengisi</option>
+  </select>
+  <button>Kirim baterai</button>
+</form>
 <h3>lokasi cuaca</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
   Cuaca mengikuti GPS modul, lalu lokasi HP (otomatis saat halaman ini dibuka),
@@ -1674,6 +1774,9 @@ a{color:#3ddc97}
 const $=id=>document.getElementById(id);
 function upd(){fetch('/api/status').then(r=>r.json()).then(s=>{$('now').textContent='- '+s.screen;$('moodNow').textContent='- '+s.mood})}
 function locUpd(){fetch('/location').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)')})}
+function battUpd(){fetch('/battery').then(r=>r.json()).then(b=>{
+  $('battNow').textContent = b.level<0 ? '-' : b.level+'% '+(b.charging?'(mengisi)':'');
+})}
 function navUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
   const g=s.gps||{};
   $('routeInfo').textContent = s.route_active
@@ -1721,7 +1824,7 @@ $('feed').onclick=()=>fetch('/feed').then(upd);
 function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
 syncClock(); setInterval(syncClock, 60000);
 $('autoLoc').checked = localStorage.getItem('mochiAutoLoc') !== '0';
-upd(); locUpd(); navUpd();
+upd(); locUpd(); navUpd(); battUpd();
 if($('autoLoc').checked) locateNow();
 setInterval(()=>{ if($('autoLoc').checked) locateNow() }, 600000);
 setInterval(navUpd, 3000);
@@ -2181,7 +2284,7 @@ static void setupWeb() {
 
   // ---- kontrol dari HP (pengganti tombol fisik) ----
   web.on("/next", HTTP_GET, []() {
-    screen = (Screen)(((int)screen + 1) % (SCR_SYS + 1));
+    screen = (Screen)(((int)screen + 1) % (SCR_BATT + 1));
     Serial.printf("[web] layar -> %s\n", SCREEN_NAME[screen]);
     web.send(200, "application/json", "{\"ok\":true}");
   });
@@ -2233,6 +2336,23 @@ static void setupWeb() {
     }
     Serial.printf("[web] face frame=%d\n", (int)faceFrozen);
     web.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // baterai iPhone dari Shortcuts: /battery?level=85&charging=1
+  web.on("/battery", HTTP_GET, []() {
+    if (web.hasArg("level")) {
+      int lvl = web.arg("level").toInt();
+      String cs = web.arg("charging");
+      cs.toLowerCase();
+      bool chg = web.hasArg("charging") &&
+                 (cs == "1" || cs == "true" || cs == "yes" || cs == "on");
+      setPhoneBattery(lvl, chg);
+    }
+    char out[96];
+    snprintf(out, sizeof(out),
+             "{\"ok\":true,\"level\":%d,\"charging\":%s}",
+             (int)phoneBatt, phoneCharging ? "true" : "false");
+    web.send(200, "application/json", out);
   });
 
   // kontrol mood / kasih makan dari web: /mood?set=marah , /feed
@@ -2306,6 +2426,9 @@ static void setupWeb() {
     doc["last_fed"] = lastFed;
     doc["unread"]   = unreadCount;
     doc["messages"] = inboxCount;
+    doc["battery_level"]    = (int)phoneBatt;
+    doc["battery_charging"] = phoneCharging;
+    doc["battery_age_s"]    = phoneBattAt ? (millis() - phoneBattAt) / 1000 : 0;
     doc["nav"]      = navActive() ? navText(nav.kind) : "";
     doc["nav_dist"] = navActive() ? nav.dist : 0;
     doc["route_active"] = routeActive;
@@ -2358,6 +2481,17 @@ void setup() {
   if (storedMood >= (uint32_t)Mood::Count) storedMood = 0;
   mood = (Mood)storedMood;
   lastFed = nvsGet("fed", 0);
+
+  // Baterai terakhir tetap tampil setelah reboot (umur dianggap 0 =
+  // "tersimpan" sampai Shortcuts mengirim data baru).
+  {
+    uint32_t b = nvsGet("batt", 255);
+    if (b <= 100) {
+      phoneBatt     = (int8_t)b;
+      phoneCharging = nvsGet("battchg", 0) != 0;
+      phoneBattAt   = 0;
+    }
+  }
 
   // Lokasi cuaca yang pernah diset dari web (dipakai kalau GPS tidak fix).
   wxLocSet = prefs.getBool("wxlocset", false);
@@ -2544,7 +2678,7 @@ void loop() {
                                          : (uint32_t)AUTO_ROTATE_MS;
     if (millis() - lastRotate >= hold) {
       lastRotate = millis();
-      screen = (Screen)(((int)screen + 1) % (SCR_SYS + 1));
+      screen = (Screen)(((int)screen + 1) % (SCR_BATT + 1));
     }
   }
 

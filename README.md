@@ -209,6 +209,7 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 | `/mochi.gif` | animasi mochi 77 frame dari `mi_bef.gif` (sama dengan OLED) |
 | `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`) |
 | `/feed` | kasih makan (langsung tampil animasi "Nyam") |
+| `/battery?level=85&charging=1` | set baterai iPhone (0–100, `charging` 0/1) |
 
 Cukup buka `http://192.168.4.1/` di Safari/Chrome HP, tombolnya sudah ada di sana
 (termasuk tombol mood dan Kasih makan). Notifikasi baru tetap langsung muncul di
@@ -223,6 +224,20 @@ curl -X POST -H "Content-Type: application/json" ^
 ```
 
 (`^` itu line continuation di Windows CMD; di PowerShell pakai backtick.)
+
+### Baterai iPhone
+
+Layar **BATERAI HP** (dan persentase kecil di status bar) menampilkan daya
+iPhone yang dikirim lewat Shortcuts. Cara pasang otomatisasi ada di
+[`docs/IPHONE_BATTERY.md`](docs/IPHONE_BATTERY.md). Tes cepat:
+
+```
+http://192.168.4.1/battery?level=85&charging=1
+```
+
+Data terakhir disimpan di NVS, jadi tetap tampil setelah reboot (ditandai
+**tersimpan** sampai ada kiriman baru). Bisa juga dikirim lewat kabel:
+`B85|1\n`.
 
 ---
 
@@ -289,7 +304,8 @@ Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
 - `G<lat>|<lon>\n` lokasi cuaca,
 - `W<temp>|<rh>|<feels>|<wind>|<code>\n` cuaca dari Open-Meteo,
 - `M<0..4>\n` ganti mood lewat kabel (0 Senang, 1 Sedih, 2 Marah, 3 Ngantuk,
-  4 Lapar) — berguna untuk uji animasi tanpa WiFi/HP.
+  4 Lapar) — berguna untuk uji animasi tanpa WiFi/HP,
+- `B<level>|<0/1>\n` baterai iPhone (%) + status mengisi (juga bisa dari web).
 
 Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi
 ESP32 tidak perlu join WiFi `WiFI_RUMAH` supaya jam/cuaca/notif WA jalan. GPS tetap
