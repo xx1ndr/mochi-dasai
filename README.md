@@ -438,12 +438,14 @@ Frame ada di `include/mood_frames.h` (6 set × 75 frame, 128x64 1-bit, PROGMEM):
 
 Diputar looping di `drawFace()` (`src/main.cpp`) dengan delay asli 60/70 ms per
 frame. Splash restart dan diagnosa `/face?frame=N` memakai set idle. Generator
-memakai **satu threshold stabil per GIF** (median, ~34% piksel putih) plus
-**ordered dithering Bayer 4x4 hanya di piksel yang dekat ambang** (±15).
-Interior dan background tetap solid/bersih, sedangkan pinggiran jadi lebih
-halus (tidak kotak-kotak) di OLED 1-bit. Catatan: OLED 128x64 cuma bisa
-hitam/putih, jadi gradasi GIF tetap akan tampil sebagai pola titik halus —
-bukan bug, tapi keterbatasan layar.
+memilih **satu ambang stabil per GIF di "lembah" histogram** (bukan di puncak),
+plus **ordered dithering Bayer 4x4 hanya di piksel dekat ambang** (±15).
+
+Ambang di lembah penting: kalau ambang jatuh di puncak histogram, pergeseran
+kecerahan 0,5 level antar frame bisa membalik ribuan piksel sekaligus sehingga
+wajah kelihatan berubah-ubah/berkedip. Dengan ambang di lembah, bentuk wajah
+stabil; dithering melunakkan pinggirannya di OLED 1-bit. Catatan: OLED 128x64
+cuma bisa hitam/putih, jadi gradasi GIF tetap tampil sebagai pola titik halus.
 
 File animasi lama (`dasai_frames.h`, `mochi_gif.h`, `mochi_frames.h`) sudah
 dihapus. `include/mochi_web_gif.h` berisi versi kecil `happy.gif` untuk

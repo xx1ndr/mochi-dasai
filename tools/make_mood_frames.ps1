@@ -113,20 +113,31 @@ foreach ($name in $gifs) {
   }
   if ($delays.Count -ne $count) { $delays = @(7) * $count }
 
-  # SATU threshold per GIF, diambil median dari threshold tiap frame.
-  # Threshold per frame bikin gambar berkedip ("pecah") karena nilainya bisa
-  # melonjak 200+ antar frame. Median stabil tapi tetap pas untuk GIF gelap.
-  $sampleThr = @()
-  $step = [Math]::Max(1, [int]($count / 12))
+  # PILIH AMBANG DI "LEMBAH" HISTOGRAM -- ini kunci anti-berkedip.
+  # Kalau ambang jatuh di puncak histogram (banyak piksel dengan luminansi
+  # hampir sama), pergeseran 0,5 level antar frame bisa membalik ribuan piksel
+  # sekaligus -> wajah kelihatan berubah-ubah tiap frame. Ambang di lembah
+  # (histogram lokal minimum) membuat bentuk wajah stabil.
+  $hist = New-Object 'int[]' 766
+  $histTotal = 0
+  $step = [Math]::Max(1, [int]($count / 25))
   for ($f = 0; $f -lt $count; $f += $step) {
-    $sampleThr += Get-Threshold (Get-Luma $img $f)
+    foreach ($s in (Get-Luma $img $f)) { $hist[$s]++; $histTotal++ }
   }
-  $sorted = @($sampleThr | Sort-Object)
-  $mid = [int]($sorted.Count / 2)
-  if (($sorted.Count % 2) -eq 0) {
-    $thr = [int](($sorted[$mid - 1] + $sorted[$mid]) / 2)
-  } else {
-    $thr = [int]$sorted[$mid]
+  $whiteMin = 0.16
+  $whiteMax = $TargetWhite
+  $bestDensity = [int]::MaxValue
+  $thr = 200
+  for ($t = 80; $t -le 700; $t++) {
+    $white = 0
+    for ($v = $t + 1; $v -le 765; $v++) { $white += $hist[$v] }
+    $frac = $white / [double]$histTotal
+    if ($frac -lt $whiteMin -or $frac -gt $whiteMax) { continue }
+    $lo = [Math]::Max(0, $t - 15)
+    $hi = [Math]::Min(765, $t + 15)
+    $density = 0
+    for ($v = $lo; $v -le $hi; $v++) { $density += $hist[$v] }
+    if ($density -lt $bestDensity) { $bestDensity = $density; $thr = $t }
   }
 
   $offsets += $allBytes.Count
@@ -169,8 +180,8 @@ $g.Dispose(); $small.Dispose()
 $lines = @()
 $lines += '// GENERATED oleh tools/make_mood_frames.ps1 dari 6 GIF ekspresi.'
 $lines += '// Urutan set: Senang, Sedih, Marah, Ngantuk, Lapar (enum Mood), lalu Idle.'
-$lines += '// Threshold stabil per GIF + ordered dithering Bayer 4x4 di dekat ambang.'
-$lines += '// Dithering melunakkan pinggiran (tidak kotak-kotak) tanpa bintik di background.'
+$lines += '// Ambang stabil per GIF dipilih di LEMBAH histogram (anti-berkedip).'
+$lines += '// + ordered dithering Bayer 4x4 di dekat ambang untuk pinggiran lebih halus.'
 $lines += '// Frame 128x64, 1 bit/px, LSB-first (format u8g2 drawXBMP). Jangan diedit manual.'
 $lines += '#pragma once'
 $lines += '#include <Arduino.h>'
