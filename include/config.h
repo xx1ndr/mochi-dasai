@@ -66,11 +66,6 @@
 #define PIN_GPS_RX 4    // ESP32 RX  <- GPS TX
 #define PIN_GPS_TX 5    // ESP32 TX  -> GPS RX (boleh tidak disambung)
 #define PIN_BTN    3    // TTP223 OUT (aktif HIGH)
-#define PIN_BUZZ   10   // pin utama (kompatibel lama)
-// Pin uji: nyalakan beberapa GPIO aman sekaligus supaya buzzer bunyi
-// di mana pun kaki + dipasang. 6/7/10 tidak dipakai OLED/GPS/tombol.
-#define BUZZ_PIN_COUNT 3
-#define BUZZ_PINS  { 6, 7, 10 }
 
 // TTP223 keluaran HIGH saat disentuh. Kalau pakai tombol ke GND, ubah ke LOW.
 #define BTN_ACTIVE HIGH
@@ -80,10 +75,6 @@
 
 // ---------------- Fitur opsional ----------------
 #define HAS_BUTTON 1      // 1 kalau sensor sentuh / tombol sudah dipasang
-#define HAS_BUZZER     1   // 1 kalau buzzer sudah dipasang (notif + tombol)
-// Buzzer aktif (ada tanda +, bunyi kalau dikasih DC) = 1.
-// Buzzer pasif (tanpa tanda +, butuh frekuensi) = 0.
-#define BUZZER_ACTIVE  1
 #define AUTO_ROTATE_MS 0      // 0 = mati (disarankan saat pakai sensor sentuh)
 
 // ---------------- Mood & rasa lapar ----------------

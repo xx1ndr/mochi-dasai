@@ -42,7 +42,6 @@ Layar tambahan: Menu, Ubah mood, dan Makan (muncul lewat sentuhan).
 | OLED 0.96" SSD1306 | 128x64, I2C, alamat 0x3C |
 | GPS module | NEO-6M / ATGM336H / u-blox MAX-M10S (UART) |
 | Sensor sentuh | TTP223 (OUT aktif HIGH) ke GPIO3 — layar tetap bisa dikontrol dari web |
-| Buzzer | buzzer aktif 3.3V di GPIO10 — bunyi saat notifikasi WA/Telegram, tombol, dan mood |
 | Kabel | 8-10 jumper female-female |
 
 Catatan:
@@ -67,24 +66,6 @@ Catatan:
 | TTP223 | OUT | GPIO3 |
 | TTP223 | VCC | 3V3 |
 | TTP223 | GND | GND |
-| Buzzer | + | GPIO10 (wajib lewat transistor, lihat bawah) |
-| Buzzer | - | Kolektor transistor NPN |
-
-### Wiring buzzer (wajib transistor)
-
-GPIO ESP32-C3 maksimal ~20 mA, sedangkan buzzer aktif butuh ~20–30 mA.
-Kalau buzzer dicolok langsung ke GPIO, biasanya **tidak bunyi** walaupun kode sudah benar.
-Tes cepat: sentuh `+` buzzer ke 3V3 — kalau bunyi, berarti buzzer bagus dan yang kurang arusnya.
-
-```
-3V3  ──────> + buzzer
-               - buzzer ──> C  (kolektor NPN: 2N2222 / BC547 / S8050)
-IO10 ──[1kΩ]────────────> B  (base)
-GND  ───────────────────> E  (emitor)
-```
-
-Kalau tidak ada resistor 1kΩ, pakai 470Ω–2.2kΩ juga boleh.
-Kalau pakai MOSFET logic-level (AO3400, IRLZ44N), gate langsung ke IO10, source ke GND, drain ke `-` buzzer (resistor gate opsional).
 
 Kalau pin bentrok dengan kebutuhanmu, ubah di `include/config.h`.
 Di ESP32-C3 pin I2C/UART bebas dipilih, jadi susunan ini cuma kesepakatan:
@@ -176,14 +157,21 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
   `configTzTime(TZ_STRING, ...)`, bukan `configTime(0,0,...)` — yang terakhir
   diam-diam mengubah TZ jadi UTC sehingga jam tampil 7 jam lebih awal (dulu
   terjadi setelah tombol **Refresh** / sinkron ulang tiap jam).
-- **Cuaca mengikuti lokasi.** Urutan prioritas: lokasi dari PC lewat kabel serial
-  → GPS (kalau ada fix) → lokasi yang diset dari halaman web → geolokasi IP →
-  `HOME_LAT`/`HOME_LON` di `config.h`. Karena GPS sering tidak dapat sinyal di
-  dalam ruangan, bridge PC mengirim lokasi (IP publik) lewat kabel. Bisa juga isi
-  koordinatmu di halaman web
-  (**lokasi cuaca** → *Simpan lokasi*, atau tombol *Pakai lokasi HP*). Lokasi ini
+- **Cuaca & navigasi mengikuti lokasi.** Urutan prioritas: lokasi HP (GPS HP lewat
+  web) → GPS modul (kalau ada fix) → lokasi dari PC lewat kabel serial →
+  geolokasi IP → `HOME_LAT`/`HOME_LON` di `config.h`. Bisa juga isi koordinat
+  manual di halaman web (**lokasi HP / GPS** → *Simpan lokasi*). Lokasi ini
   tersimpan di NVS dan dipakai juga oleh peta di `/maps`. Cek lewat
   `/location?reset=1` kalau mau kembali ke koordinat default.
+
+  > **GPS HP butuh HTTPS.** Browser hanya mengizinkan `navigator.geolocation`
+  > di origin aman (`https://` atau `localhost`). Kalau halaman dibuka lewat
+  > `http://192.168.x.x`, tombol *Mulai lokasi HP* otomatis jatuh ke lokasi IP.
+  > Jalankan `bridge\lokasi_hp.bat` (cloudflared sudah terpasang), lalu buka URL
+  > `https://...` yang muncul di HP dan izinkan akses lokasi. Setelah itu
+  > `watchPosition()` mengirim koordinat ke `/location?src=hp` setiap kali
+  > bergeser ≥10 m (maksimal 1 kali per 10 detik) — cukup untuk navigasi tanpa
+  > membanjiri ESP32 dengan request cuaca.
 
   > Tanpa internet, cuaca & Telegram tidak jalan. `AP_ONLY` sudah `0`, jadi ESP32
   > jadi hotspot **dan** ikut WiFi rumah sekaligus. Isi `WIFI_SSID`/`WIFI_PASS`
@@ -200,7 +188,6 @@ Sensor TTP223 sudah diaktifkan di `include/config.h`:
 |---|---|---|
 | `HAS_BUTTON` | `1` | sensor/button aktif di GPIO3 |
 | `BTN_ACTIVE` | `HIGH` | TTP223 aktif HIGH (tombol ke GND → ubah ke `LOW`) |
-| `HAS_BUZZER` | `1` | `0` = mati kalau buzzer tidak dipasang. Notifikasi = 2 nada naik, tombol = 1 nada pendek |
 | `AUTO_ROTATE_MS` | `0` | `0` = mati (disarankan supaya tidak bertabrakan dengan menu) |
 | `HUNGER_SEC` | `3600` | detik sampai mochi lapar setelah terakhir makan |
 | `AP_ONLY` | `0` | hotspot + STA, supaya bridge WA di PC bisa mengirim notif lewat IP LAN |
@@ -211,7 +198,8 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 |---|---|
 | `/next` | pindah ke layar berikutnya |
 | `/refresh` | ambil ulang cuaca + sinkron jam (NTP, zona waktu tetap WIB) |
-| `/location?lat=-6.2&lon=106.8` | set lokasi cuaca (tersimpan di NVS) |
+| `/location?lat=-6.2&lon=106.8` | set lokasi manual (tersimpan di NVS) |
+| `/location?lat=-6.2&lon=106.8&src=hp` | set lokasi dari GPS HP (dilaporkan `wx_src: hp`) |
 | `/location?reset=1` | kembali ke `HOME_LAT`/`HOME_LON` |
 | `/clear` | hapus semua notifikasi di inbox |
 | `/notify?from=..&text=..` | kirim notifikasi |
@@ -372,8 +360,7 @@ Telegram Bot API.
    tidak perlu edit `config.h` atau upload ulang. Bisa juga lewat kabel:
    `K<token>\n`. Token tidak pernah dikirim balik ke browser/log.
 3. Buka Telegram, cari bot kamu, tekan **Start**, lalu kirim pesan. Pesan akan
-   muncul di layar **PESAN** dengan tag `[TG]`, plus bunyi buzzer (kalau
-   buzzer dipasang).
+   muncul di layar **PESAN** dengan tag `[TG]`.
 
 > ESP32 harus tersambung WiFi yang bisa internet (`WiFi rumah`) agar `getUpdates`
 > jalan. Tanpa itu bot tetap tersimpan tapi tidak menerima pesan.
@@ -463,10 +450,11 @@ endpoint `/mochi.gif`.
 
 Cukup masukkan tujuan, ESP32 yang menentukan belokannya:
 
-1. Modul GPS **tidak wajib**. Posisi diambil berurutan dari: modul GPS → lokasi
-   HP yang dikirim halaman web (`/location`) → geolokasi IP → titik default
-   `HOME_LAT/HOME_LON`. Buka halaman web di HP dan biarkan **Ikuti lokasi
-   otomatis** aktif supaya posisi HP dikirim tiap beberapa detik saat rute jalan.
+1. Modul GPS **tidak wajib**. Posisi diambil berurutan dari: lokasi HP yang
+   dikirim halaman web (`/location?src=hp`) → modul GPS → geolokasi IP → titik
+   default `HOME_LAT/HOME_LON`. Buka halaman web di HP lewat tunnel HTTPS
+   (`lokasi_hp.bat`) dan biarkan **Ikuti lokasi HP otomatis** aktif; posisi HP
+   dikirim otomatis lewat `watchPosition()` setiap bergeser ≥10 m.
 2. Buka halaman web → **navigasi otomatis**.
 3. Ketik nama tempat di **Cari tempat** (misal `Monas Jakarta`) → klik **Cari**;
    koordinat tujuan otomatis terisi. Boleh juga isi `latitude`/`longitude`

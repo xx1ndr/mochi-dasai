@@ -25,7 +25,6 @@
 #include <time.h>
 #include <sys/time.h>
 #include <esp_system.h>        // esp_random() untuk ekspresi acak
-#include <driver/gpio.h>       // gpio_set_drive_capability() untuk buzzer
 #include <math.h>
 #include <string.h>
 
@@ -120,12 +119,14 @@ static bool     wxFromSerial = false;   // data cuaca dikirim PC lewat kabel USB
 //   GPS -> lokasi dari web/HP (NVS) -> geolokasi IP publik -> HOME.
 static float    wxLat = HOME_LAT, wxLon = HOME_LON;
 static bool     wxLocSet = false;
+static bool     wxLocPhone = false;   // koordinat berasal dari GPS HP lewat web
 
 // Lokasi otomatis dari IP publik ESP32 (tidak disimpan di NVS, refresh 30 mnt).
 static float    wxIpLat = NAN, wxIpLon = NAN;
 static uint32_t wxIpAge = 0;
 
 static const char* wxSource() {
+  if (wxLocSet && wxLocPhone) return "hp";   // HP dikirim lewat web/geolocation
   if (wxFromSerial) return "serial";
   if (gps.location.isValid() && gps.location.age() < 5000) return "gps";
   if (wxLocSet) return "web";
@@ -225,68 +226,6 @@ static const char* wxText(int code) {
   return "Cuaca tak dikenal";
 }
 
-// Buzzer aktif butuh DC, pasif butuh frekuensi. Dua-duanya didukung.
-// Nyalakan semua pin uji sekaligus: mana pun yang dipakai, tetap bunyi.
-static const uint8_t BUZZ_PINS_ALL[BUZZ_PIN_COUNT] = BUZZ_PINS;
-static void buzzOn(uint16_t hz) {
-#if BUZZER_ACTIVE
-  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) digitalWrite(BUZZ_PINS_ALL[i], HIGH);
-#else
-  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) tone(BUZZ_PINS_ALL[i], hz ? hz : 2000);
-#endif
-}
-static void buzzOff() {
-#if BUZZER_ACTIVE
-  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) digitalWrite(BUZZ_PINS_ALL[i], LOW);
-#else
-  for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) noTone(BUZZ_PINS_ALL[i]);
-#endif
-}
-
-static void beep() {
-  if (!HAS_BUZZER) return;
-  buzzOn(2600);
-  delay(70);
-  buzzOff();
-}
-
-// /buzz non-blocking: pin tetap HIGH sampai task matikan di loop().
-static uint32_t webBuzzOffAt = 0;
-static void webBuzzTask() {
-  if (webBuzzOffAt && (int32_t)(millis() - webBuzzOffAt) >= 0) {
-    webBuzzOffAt = 0;
-    buzzOff();
-  }
-}
-
-// Notifikasi: dua pulse supaya beda dari bunyi tombol/mood.
-static uint32_t notifyToneAt = 0;
-static uint8_t  notifyStep   = 0;
-
-static void notifyBeep() {
-  if (!HAS_BUZZER) return;
-  notifyStep = 1;
-  notifyToneAt = millis();
-  buzzOn(1800);
-}
-
-static void notifyBeepTask() {
-  if (!HAS_BUZZER || notifyStep == 0) return;
-  uint32_t now = millis();
-  if (notifyStep == 1 && now - notifyToneAt >= 120) {
-    buzzOff();
-    notifyStep = 2;
-    notifyToneAt = now;
-  } else if (notifyStep == 2 && now - notifyToneAt >= 60) {
-    buzzOn(2400);
-    notifyStep = 3;
-    notifyToneAt = now;
-  } else if (notifyStep == 3 && now - notifyToneAt >= 120) {
-    buzzOff();
-    notifyStep = 0;
-  }
-}
-
 static void addNotification(const char* src, const char* from, const char* text) {
   for (int i = INBOX_MAX - 1; i > 0; --i) inbox[i] = inbox[i - 1];
   sanitize(inbox[0].src, sizeof(inbox[0].src), (src && *src) ? src : "?");
@@ -296,7 +235,6 @@ static void addNotification(const char* src, const char* from, const char* text)
   inbox[0].unread = true;
   if (inboxCount < INBOX_MAX) inboxCount++;
   if (unreadCount < 99) unreadCount++;
-  notifyBeep();
   Serial.printf("[%s] %s: %s\n", inbox[0].src, inbox[0].from, inbox[0].text);
 }
 
@@ -329,28 +267,29 @@ static void setPhoneBattery(int level, bool charging) {
 }
 
 // Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau GPS tidak fix.
-static void saveWxLocation(float lat, float lon) {
+// fromPhone=true kalau sumbernya GPS HP (browser geolocation lewat /location?src=hp).
+static void saveWxLocation(float lat, float lon, bool fromPhone = false) {
   prefs.putBool("wxlocset", true);
+  prefs.putBool("wxlocphone", fromPhone);
   prefs.putFloat("wxlat", lat);
   prefs.putFloat("wxlon", lon);
-  wxLat = lat; wxLon = lon; wxLocSet = true;
+  wxLat = lat; wxLon = lon; wxLocSet = true; wxLocPhone = fromPhone;
 }
 static void clearWxLocation() {
   prefs.remove("wxlocset");
-  wxLat = HOME_LAT; wxLon = HOME_LON; wxLocSet = false;
+  prefs.remove("wxlocphone");
+  wxLat = HOME_LAT; wxLon = HOME_LON; wxLocSet = false; wxLocPhone = false;
 }
 
 static void goFace() {
   screen = SCR_FACE;
   faceHintUntil = millis() + 6000;
-  beep();
 }
 
 static void openMenu() {
   screen = SCR_MENU;
   menuIndex = 0;
   lastInput = millis();
-  beep();
 }
 
 static void setMood(Mood next) {
@@ -1600,7 +1539,6 @@ static void onLongPress() {
       break;
     case SCR_MSG:
       clearInbox();
-      beep();
       Serial.println("[ui] notif dihapus");
       openMenu();                          // jangan sampai nyangkut di layar notif
       break;
@@ -1755,9 +1693,14 @@ static void handleSerialLine(const char* line) {
       float lo = atof(s);
       if (isfinite(la) && isfinite(lo) && la >= -90.f && la <= 90.f &&
           lo >= -180.f && lo <= 180.f) {
-        saveWxLocation(la, lo);
         wxFromSerial = true;
-        Serial.printf("[cuaca] lokasi dari PC: %.4f,%.4f\n", la, lo);
+        if (wxLocSet && wxLocPhone) {
+          // HP sedang mengirim koordinat asli: jangan ditimpa lokasi IP dari PC.
+          Serial.println("[cuaca] lokasi HP aktif, G dari PC diabaikan");
+        } else {
+          saveWxLocation(la, lo);
+          Serial.printf("[cuaca] lokasi dari PC: %.4f,%.4f\n", la, lo);
+        }
       }
     }
     return;
@@ -1842,15 +1785,6 @@ a{color:#3ddc97}
   </select>
   <button>Kirim baterai</button>
 </form>
-<h3>buzzer <span id=buzzNow>(uji)</span></h3>
-<button class=alt onclick="fetch('/buzz?ms=700')">Bunyi 0.7 detik</button>
-<button class=alt onclick="fetch('/buzz?ms=2000')">Bunyi 2 detik</button>
-<button class=alt onclick="notifyBeepTest()">Bunyi notif (2 pulse)</button>
-<script>
-function notifyBeepTest(){
-  fetch('/buzz?ms=120').then(()=>setTimeout(()=>fetch('/buzz?ms=120'),180));
-}
-</script>
 <h3>bot Telegram <span id=tgNow>-</span></h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
   Token dari @BotFather. Tanpa ini, notifikasi Telegram &amp; perintah
@@ -1863,18 +1797,18 @@ function notifyBeepTest(){
   <button>Simpan token</button>
 </form>
 <button class=alt onclick="fetch('/telegram?clear=1').then(r=>r.json()).then(()=>tgUpd())">Hapus token</button>
-<h3>lokasi cuaca</h3>
+<h3>lokasi HP / GPS</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
-  Cuaca mengikuti GPS modul, lalu lokasi HP (otomatis saat halaman ini dibuka),
-  lalu perkiraan kota dari IP WiFi ESP32. Tanpa sinyal GPS pun tetap berubah
-  saat kamu pindah tempat. Isi manual kalau mau mengunci satu lokasi.
+  GPS HP dikirim terus ke ESP32 lewat WiFi (dipakai navigasi &amp; cuaca).
+  Prioritas: GPS modul &rarr; HP &rarr; IP WiFi. <b>Geolocation butuh HTTPS</b>:
+  buka halaman ini lewat tunnel (lihat README), kalau tidak akan jatuh ke IP.
 </p>
 <form onsubmit="event.preventDefault();
   fetch('/location?lat='+encodeURIComponent(la.value)+'&lon='+encodeURIComponent(lo.value))
   .then(r=>r.json()).then(l=>{
     $('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)');
     $('autoLoc').checked=false; localStorage.setItem('mochiAutoLoc','0');
-    $('geoErr').textContent='Lokasi manual dikunci (auto dimatikan)';
+    stopWatch(); $('geoErr').textContent='Lokasi manual dikunci (auto dimatikan)';
   })">
   <input id=la type=number step=0.0001 placeholder="latitude, mis -6.2000">
   <input id=lo type=number step=0.0001 placeholder="longitude, mis 106.8167">
@@ -1883,9 +1817,11 @@ function notifyBeepTest(){
 <p style="font-size:12px">Sekarang: <b id=locNow>-</b> &middot;
   <a href="#" onclick="fetch('/location?reset=1').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+' (default)'});return false">reset</a>
 </p>
-<label style="font-size:13px"><input id=autoLoc type=checkbox checked> Ikuti lokasi otomatis</label>
+<label style="font-size:13px"><input id=autoLoc type=checkbox checked> Ikuti lokasi HP otomatis</label>
 <p id=geoErr style="font-size:12px;color:#888"></p>
-<button class=alt onclick="locateNow()">Cari lokasi sekarang</button>
+<p id=geoSrc style="font-size:12px;color:#888">Sumber: -</p>
+<button class=alt id=geoBtn onclick="toggleLoc()">Mulai lokasi HP</button>
+<button class=alt onclick="locateNow()">Kirim sekarang</button>
 <h3>navigasi otomatis</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
   Masukkan tujuan (nama tempat atau koordinat). Posisi boleh dari modul GPS,
@@ -1932,7 +1868,10 @@ function notifyBeepTest(){
 <script>
 const $=id=>document.getElementById(id);
 function upd(){fetch('/api/status').then(r=>r.json()).then(s=>{$('now').textContent='- '+s.screen;$('moodNow').textContent='- '+s.mood})}
-function locUpd(){fetch('/location').then(r=>r.json()).then(l=>{$('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)')})}
+function locUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
+  $('locNow').textContent=Number(s.wx_lat).toFixed(4)+', '+Number(s.wx_lon).toFixed(4);
+  $('geoSrc').textContent='Sumber: '+s.wx_src;
+})}
 function battUpd(){fetch('/battery').then(r=>r.json()).then(b=>{
   $('battNow').textContent = b.level<0 ? '-' : b.level+'% '+(b.charging?'(mengisi)':'');
 })}
@@ -1948,39 +1887,77 @@ function navUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
   // Tanpa modul GPS, posisi HP dikirim ulang supaya jarak/panah terus jalan.
   if (aktif && $('autoLoc').checked && !g.fix) locateNow();
 })}
-function kirimLokasi(lat,lon,sumber){
-  fetch('/location?lat='+Number(lat).toFixed(5)+'&lon='+Number(lon).toFixed(5))
-    .then(r=>r.json()).then(l=>{
-      $('locNow').textContent=l.lat+', '+l.lon+(l.set?'':' (default)');
-      $('geoErr').style.color='#3ddc97';
-      $('geoErr').textContent='Lokasi dari '+sumber+' tersimpan';
-    }).catch(()=>{ $('geoErr').textContent='Gagal mengirim lokasi ke ESP32' });
+let geoWatch=null, lastSend=0, lastLat=null, lastLon=null;
+function geoStatus(txt,color){$('geoErr').style.color=color||'#888';$('geoErr').textContent=txt}
+function kirimLokasi(lat,lon,sumber,dariHp){
+  const now=Date.now();
+  if(dariHp){
+    if(now-lastSend<10000) return;                 // throttle: 1 kirim / 10 detik
+    if(lastLat!==null){
+      const dy=(lat-lastLat)*111000;
+      const dx=(lon-lastLon)*111000*Math.cos(lat*Math.PI/180);
+      if(dx*dx+dy*dy<100) return;                  // belum bergeser 10 meter
+    }
+  }
+  lastSend=now; lastLat=lat; lastLon=lon;
+  const url='/location?lat='+Number(lat).toFixed(5)+'&lon='+Number(lon).toFixed(5)
+           +(dariHp?'&src=hp':'');
+  fetch(url).then(r=>r.json()).then(l=>{
+    $('locNow').textContent=Number(l.lat).toFixed(4)+', '+Number(l.lon).toFixed(4);
+    $('geoSrc').textContent='Sumber: '+sumber;
+    geoStatus('Tersimpan dari '+sumber,'#3ddc97');
+  }).catch(()=>geoStatus('Gagal mengirim lokasi ke ESP32','#e57373'));
 }
 function lokasiDariIP(){
-  $('geoErr').style.color='#888';
-  $('geoErr').textContent='GPS HP tidak tersedia, pakai lokasi IP...';
+  geoStatus('GPS HP tidak tersedia, pakai lokasi IP...');
   fetch('https://ipwho.is/').then(r=>r.json()).then(d=>{
     if(d.success && isFinite(d.latitude) && isFinite(d.longitude))
-      kirimLokasi(d.latitude,d.longitude,'IP ('+(d.city||'?')+')');
-    else $('geoErr').textContent='Lokasi IP gagal, isi manual saja';
-  }).catch(()=>{ $('geoErr').textContent='Lokasi IP gagal (HP tanpa internet?)' });
+      kirimLokasi(d.latitude,d.longitude,'IP ('+(d.city||'?')+')',false);
+    else geoStatus('Lokasi IP gagal, isi manual saja','#e57373');
+  }).catch(()=>geoStatus('Lokasi IP gagal (HP tanpa internet?)','#e57373'));
+}
+function startWatch(){
+  if(!$('autoLoc').checked || geoWatch!==null) return;
+  if(!navigator.geolocation){geoStatus('Browser tidak support geolocation','#e57373');lokasiDariIP();return}
+  if(!window.isSecureContext){
+    geoStatus('Butuh HTTPS! Buka lewat tunnel (lihat README)','#e57373');lokasiDariIP();return
+  }
+  geoStatus('Mencari sinyal GPS HP...');
+  geoWatch=navigator.geolocation.watchPosition(
+    p=>{
+      geoStatus('Lokasi HP aktif · akurasi ±'+Math.round(p.coords.accuracy||0)+' m','#3ddc97');
+      kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP',true);
+    },
+    e=>{geoStatus('GPS HP: '+(e.message||'gagal')+' → pakai IP','#e57373');lokasiDariIP()},
+    {enableHighAccuracy:true,timeout:10000,maximumAge:3000}
+  );
+  $('geoBtn').textContent='Hentikan lokasi HP';
+}
+function stopWatch(){
+  if(geoWatch!==null && navigator.geolocation) navigator.geolocation.clearWatch(geoWatch);
+  geoWatch=null;
+  $('geoBtn').textContent='Mulai lokasi HP';
+  geoStatus('Pelacakan lokasi HP dimatikan');
+}
+function toggleLoc(){
+  $('autoLoc').checked=!$('autoLoc').checked;
+  localStorage.setItem('mochiAutoLoc',$('autoLoc').checked?'1':'0');
+  if($('autoLoc').checked) startWatch(); else stopWatch();
 }
 function locateNow(){
   if(!$('autoLoc').checked) return;
-  if(navigator.geolocation){
-    $('geoErr').style.color='#888';
-    $('geoErr').textContent='Mencari lokasi HP...';
+  startWatch();
+  if(Date.now()-lastSend>60000 && navigator.geolocation && window.isSecureContext){
     navigator.geolocation.getCurrentPosition(
-      p=>kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP'),
+      p=>kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP',true),
       e=>lokasiDariIP(),
-      {enableHighAccuracy:false, timeout:8000, maximumAge:5000}
+      {enableHighAccuracy:false,timeout:8000,maximumAge:5000}
     );
-  } else lokasiDariIP();
+  }
 }
 $('autoLoc').onchange=()=>{
   localStorage.setItem('mochiAutoLoc',$('autoLoc').checked?'1':'0');
-  if($('autoLoc').checked) locateNow();
-  else $('geoErr').textContent='Lokasi otomatis dimatikan';
+  if($('autoLoc').checked) startWatch(); else stopWatch();
 };
 $('next').onclick=()=>fetch('/next').then(upd);
 $('refresh').onclick=()=>fetch('/refresh');
@@ -1990,8 +1967,8 @@ function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=
 syncClock(); setInterval(syncClock, 60000);
 $('autoLoc').checked = localStorage.getItem('mochiAutoLoc') !== '0';
 upd(); locUpd(); navUpd(); battUpd(); tgUpd();
-if($('autoLoc').checked) locateNow();
-setInterval(()=>{ if($('autoLoc').checked) locateNow() }, 600000);
+if($('autoLoc').checked) startWatch();
+setInterval(locUpd, 30000);
 setInterval(navUpd, 3000);
 </script>
 )HTML";
@@ -2421,9 +2398,11 @@ static void setupWeb() {
       float la = web.arg("lat").toFloat();
       float lo = web.arg("lon").toFloat();
       if (la >= -90.0f && la <= 90.0f && lo >= -180.0f && lo <= 180.0f) {
-        saveWxLocation(la, lo);
+        bool fromPhone = web.arg("src") == "hp";
+        saveWxLocation(la, lo, fromPhone);
         forceWeather = true;
-        Serial.printf("[cuaca] lokasi diset: %.4f,%.4f\n", la, lo);
+        Serial.printf("[cuaca] lokasi diset: %.4f,%.4f (%s)\n", la, lo,
+                      fromPhone ? "HP" : "web");
       }
     }
     char out[96];
@@ -2611,20 +2590,6 @@ static void setupWeb() {
     web.send(200, "application/json", out);
   });
 
-  // uji buzzer: /buzz?ms=600   (tanpa arg = 400ms)
-  web.on("/buzz", HTTP_GET, []() {
-    if (!HAS_BUZZER) {
-      web.send(200, "application/json", "{\"ok\":false,\"msg\":\"buzzer mati\"}");
-      return;
-    }
-    int ms = web.hasArg("ms") ? web.arg("ms").toInt() : 400;
-    if (ms < 50) ms = 50;
-    if (ms > 10000) ms = 10000;
-    buzzOn(2000);
-    webBuzzOffAt = millis() + ms;
-    web.send(200, "application/json", "{\"ok\":true,\"ms\":" + String(ms) + "}");
-  });
-
   // token bot Telegram: /telegram?token=...  atau /telegram?clear=1
   // Token tidak dikirim kembali ke browser ( hanya panjangnya ).
   web.on("/telegram", HTTP_GET, []() {
@@ -2696,7 +2661,6 @@ static void setupWeb() {
     doc["ip"]       = WiFi.localIP().toString();
     doc["rssi"]     = WiFi.RSSI();
     doc["heap"]     = ESP.getFreeHeap();
-    doc["buzz"]     = BUZZER_ACTIVE ? digitalRead(BUZZ_PINS_ALL[0]) : -1;
     doc["screen"]   = SCREEN_NAME[screen];
     doc["mood"]     = moodName(mood);
     {
@@ -2715,7 +2679,8 @@ static void setupWeb() {
     doc["wx_lat"]    = wxLat;
     doc["wx_lon"]    = wxLon;
     doc["wx_loc_set"] = wxLocSet;
-    doc["wx_src"]     = wxSource();        // gps | web | ip | default
+    doc["wx_phone"]   = wxLocPhone;
+    doc["wx_src"]     = wxSource();        // hp | gps | web | serial | ip | default
     if (!isnan(wxIpLat)) {
       doc["wx_ip_lat"] = wxIpLat;
       doc["wx_ip_lon"] = wxIpLon;
@@ -2726,6 +2691,7 @@ static void setupWeb() {
     doc["battery_level"]    = (int)phoneBatt;
     doc["battery_charging"] = phoneCharging;
     doc["battery_age_s"]    = phoneBattAt ? (millis() - phoneBattAt) / 1000 : 0;
+
     doc["nav"]      = navActive() ? navText(nav.kind) : "";
     doc["nav_dist"] = navActive() ? nav.dist : 0;
     doc["route_active"] = routeActive;
@@ -2801,6 +2767,7 @@ void setup() {
 
   // Lokasi cuaca yang pernah diset dari web (dipakai kalau GPS tidak fix).
   wxLocSet = prefs.getBool("wxlocset", false);
+  wxLocPhone = prefs.getBool("wxlocphone", false);
   if (wxLocSet) {
     wxLat = prefs.getFloat("wxlat", HOME_LAT);
     wxLon = prefs.getFloat("wxlon", HOME_LON);
@@ -2810,21 +2777,12 @@ void setup() {
   Serial.printf("[mood] boot: %s (lastFed=%lu)\n",
                 moodName(mood), (unsigned long)lastFed);
   Serial.printf("[cuaca] lokasi: %.4f,%.4f %s\n", wxLat, wxLon,
-                wxLocSet ? "(dari web)" : "(default)");
+                !wxLocSet ? "(default)" : (wxLocPhone ? "(dari HP)" : "(dari web)"));
 
   if (HAS_BUTTON) {
     // Tombol ke GND aktif LOW; TTP223 aktif HIGH.
     pinMode(PIN_BTN, BTN_ACTIVE == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
   }
-  if (HAS_BUZZER) {
-    for (uint8_t i = 0; i < BUZZ_PIN_COUNT; ++i) {
-      pinMode(BUZZ_PINS_ALL[i], OUTPUT);
-      digitalWrite(BUZZ_PINS_ALL[i], LOW);
-      // Naikkan drive strength: default ~20mA sering kurang untuk buzzer aktif.
-      gpio_set_drive_capability((gpio_num_t)BUZZ_PINS_ALL[i], GPIO_DRIVE_CAP_3);
-    }
-  }
-
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
   oled.setI2CAddress(OLED_ADDR << 1);
@@ -2909,8 +2867,6 @@ void loop() {
   pumpGps();
   navTask();
   updateButton();
-  notifyBeepTask();
-  webBuzzTask();
   updateSerialInput();
   wifiTask();
   mqttTask();
