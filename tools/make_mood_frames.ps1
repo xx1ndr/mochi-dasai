@@ -6,8 +6,10 @@ param(
   [string]$Out   = 'include\mood_frames.h',
   [int]$CropX    = 0, [int]$CropY = 32,
   [int]$CropW    = 480, [int]$CropH = 240,   # rasio 2:1 = OLED 128x64
-  [double]$TargetWhite = 0.34,               # proporsi piksel putih tiap frame
-  [int]$MinThreshold   = 50                  # jangan sampai background gelap ikut putih
+  [double]$TargetWhite = 0.34,               # proporsi piksel putih frame median
+  [int]$MinThreshold   = 50,                 # jangan sampai background gelap ikut putih
+  [int]$DitherAmp      = 45,                 # amplitudo dithering (skala B+G+R 0..765)
+  [int]$DitherBand     = 15                  # dithering hanya di piksel yang dekat ambang
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -30,7 +32,7 @@ $offsets   = @()
 $small = New-Object System.Drawing.Bitmap(128, 64)
 $g = [System.Drawing.Graphics]::FromImage($small)
 # GIF ekspresi punya gradient/dithering. Bicubic merata-ratakan warna sebelum
-# threshold supaya garisnya bersih di OLED 1-bit (nearest-neighbor bikin bintik).
+# processing supaya garisnya bersih (nearest-neighbor bikin bintik besar).
 $g.InterpolationMode  = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
 $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
 $g.SmoothingMode      = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
@@ -39,11 +41,56 @@ $g.CompositingMode    = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
 $dest = New-Object System.Drawing.Rectangle(0, 0, 128, 64)
 $src  = New-Object System.Drawing.Rectangle($CropX, $CropY, $CropW, $CropH)
 
+# Matriks Bayer 4x4 untuk ordered dithering. Dipetakan ke [-A, +A].
+$bayer = @(0,8,2,10, 12,4,14,6, 3,11,1,9, 15,7,13,5)
+$bayerOff = @()
+foreach ($b in $bayer) { $bayerOff += (($b - 7.5) / 7.5) * $DitherAmp }
+
 # Baca piksel 128x64 dari canvas ke array B,G,R,A (format Format32bppArgb).
 function Read-Canvas($data) {
   $buf = New-Object byte[] ($data.Stride * 64)
   [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $buf.Length)
   return ,$buf
+}
+
+# Gambar frame f ke canvas 128x64, kembalikan array luminansi (B+G+R, 0..765).
+function Get-Luma($img, $f) {
+  $img.SelectActiveFrame([System.Drawing.Imaging.FrameDimension]::Time, $f) | Out-Null
+  $fr = New-Object System.Drawing.Bitmap($img)
+  $g.Clear([System.Drawing.Color]::Black)
+  $g.DrawImage($fr, $dest, $src, [System.Drawing.GraphicsUnit]::Pixel)
+  $fr.Dispose()
+  $data = $small.LockBits($dest, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+                          [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $buf = Read-Canvas $data
+  $stride = $data.Stride
+  $small.UnlockBits($data)
+  $sums = New-Object 'int[]' (128 * 64)
+  $pi = 0
+  for ($y = 0; $y -lt 64; $y++) {
+    $row = $y * $stride
+    for ($x = 0; $x -lt 128; $x++) {
+      $p = $row + $x * 4
+      $s = [int]$buf[$p] + [int]$buf[$p+1] + [int]$buf[$p+2]
+      if ($s -gt 765) { $s = 765 }
+      $sums[$pi] = $s
+      $pi++
+    }
+  }
+  return ,$sums
+}
+
+# Ambang untuk satu frame: cari nilai yang bikin ~TargetWhite piksel putih.
+function Get-Threshold($sums) {
+  $hist = New-Object 'int[]' 766
+  foreach ($s in $sums) { $hist[$s]++ }
+  $acc = 0
+  $need = 128 * 64 * $TargetWhite
+  for ($t = 765; $t -ge $MinThreshold; $t--) {
+    $acc += $hist[$t]
+    if ($acc -ge $need) { return $t }
+  }
+  return $MinThreshold
 }
 
 foreach ($name in $gifs) {
@@ -66,59 +113,45 @@ foreach ($name in $gifs) {
   }
   if ($delays.Count -ne $count) { $delays = @(7) * $count }
 
+  # SATU threshold per GIF, diambil median dari threshold tiap frame.
+  # Threshold per frame bikin gambar berkedip ("pecah") karena nilainya bisa
+  # melonjak 200+ antar frame. Median stabil tapi tetap pas untuk GIF gelap.
+  $sampleThr = @()
+  $step = [Math]::Max(1, [int]($count / 12))
+  for ($f = 0; $f -lt $count; $f += $step) {
+    $sampleThr += Get-Threshold (Get-Luma $img $f)
+  }
+  $sorted = @($sampleThr | Sort-Object)
+  $mid = [int]($sorted.Count / 2)
+  if (($sorted.Count % 2) -eq 0) {
+    $thr = [int](($sorted[$mid - 1] + $sorted[$mid]) / 2)
+  } else {
+    $thr = [int]$sorted[$mid]
+  }
+
   $offsets += $allBytes.Count
   $counts  += $count
-  $thrMin = 9999
-  $thrMax = 0
 
   for ($f = 0; $f -lt $count; $f++) {
-    $img.SelectActiveFrame([System.Drawing.Imaging.FrameDimension]::Time, $f) | Out-Null
-    $frame = New-Object System.Drawing.Bitmap($img)
-    $g.Clear([System.Drawing.Color]::Black)
-    $g.DrawImage($frame, $dest, $src, [System.Drawing.GraphicsUnit]::Pixel)
-    $frame.Dispose()
-
-    $data = $small.LockBits($dest, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
-                            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $buf = Read-Canvas $data
-    $stride = $data.Stride
-    $small.UnlockBits($data)
-
-    # Threshold PER FRAME: tiap frame GIF punya kecerahan beda-beda (ada yang
-    # flash putih, ada yang hampir hitam). Cari ambang yang menghasilkan ~34%
-    # piksel putih supaya tidak ada frame yang jadi blok putih penuh / hilang.
-    $hist = New-Object 'int[]' 766
-    $sums = New-Object 'int[]' (128 * 64)
+    $sums = Get-Luma $img $f
     $pi = 0
-    for ($ty = 0; $ty -lt 64; $ty++) {
-      $rowBase = $ty * $stride
-      for ($tx = 0; $tx -lt 128; $tx++) {
-        $p = $rowBase + $tx * 4
-        $s = [int]$buf[$p] + [int]$buf[$p+1] + [int]$buf[$p+2]
-        if ($s -gt 765) { $s = 765 }
-        $hist[$s]++
-        $sums[$pi] = $s
-        $pi++
-      }
-    }
-    $acc = 0
-    $need = 128 * 64 * $TargetWhite
-    $thr = $MinThreshold
-    for ($t = 765; $t -ge $MinThreshold; $t--) {
-      $acc += $hist[$t]
-      if ($acc -ge $need) { $thr = $t; break }
-    }
-    if ($thr -lt $thrMin) { $thrMin = $thr }
-    if ($thr -gt $thrMax) { $thrMax = $thr }
-
     for ($ty = 0; $ty -lt 64; $ty++) {
       for ($bx = 0; $bx -lt 16; $bx++) {
         $byte = 0
         for ($bit = 0; $bit -lt 8; $bit++) {
           $tx = $bx * 8 + $bit
-          if ($sums[$ty * 128 + $tx] -ge $thr) {
-            $byte = $byte -bor (1 -shl $bit)   # LSB-first untuk u8g2 drawXBMP
+          $lum = $sums[$pi]
+          # Ordered dithering (Bayer 4x4) HANYA di piksel yang dekat ambang
+          # (|<15|). Interior dan background yang jauh dari ambang tetap
+          # solid/bersih, pinggiran jadi halus tanpa bintik di area gelap.
+          # Band sempit penting: kalau lebar, background GIF gelap ikut
+          # berbintik karena ambangnya rendah (mis. embarrassed=76).
+          $t = $thr
+          if ([Math]::Abs($lum - $thr) -le $DitherBand) {
+            $t = $thr + [int]$bayerOff[(($ty % 4) * 4) + ($tx % 4)]
           }
+          if ($lum -ge $t) { $byte = $byte -bor (1 -shl $bit) }
+          $pi++
         }
         $allBytes.Add([byte]$byte)
       }
@@ -127,7 +160,7 @@ foreach ($name in $gifs) {
   }
 
   $img.Dispose()
-  Write-Output "  $name : $count frame, delay $(($delays | Select-Object -Unique) -join '/') x10ms, thr $thrMin..$thrMax"
+  Write-Output "  $name : $count frame, delay $(($delays | Select-Object -Unique) -join '/') x10ms, threshold=$thr"
 }
 
 $g.Dispose(); $small.Dispose()
@@ -136,7 +169,8 @@ $g.Dispose(); $small.Dispose()
 $lines = @()
 $lines += '// GENERATED oleh tools/make_mood_frames.ps1 dari 6 GIF ekspresi.'
 $lines += '// Urutan set: Senang, Sedih, Marah, Ngantuk, Lapar (enum Mood), lalu Idle.'
-$lines += '// Threshold adaptif PER FRAME (~34% putih) -- tidak ada frame blok putih/hitam.'
+$lines += '// Threshold stabil per GIF + ordered dithering Bayer 4x4 di dekat ambang.'
+$lines += '// Dithering melunakkan pinggiran (tidak kotak-kotak) tanpa bintik di background.'
 $lines += '// Frame 128x64, 1 bit/px, LSB-first (format u8g2 drawXBMP). Jangan diedit manual.'
 $lines += '#pragma once'
 $lines += '#include <Arduino.h>'

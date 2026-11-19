@@ -438,9 +438,12 @@ Frame ada di `include/mood_frames.h` (6 set × 75 frame, 128x64 1-bit, PROGMEM):
 
 Diputar looping di `drawFace()` (`src/main.cpp`) dengan delay asli 60/70 ms per
 frame. Splash restart dan diagnosa `/face?frame=N` memakai set idle. Generator
-memakai **threshold adaptif per frame** (~34% piksel putih) supaya tidak ada
-frame yang jadi blok putih penuh atau hampir hitam — ini memperbaiki animasi
-yang dulu tampak "nge bug".
+memakai **satu threshold stabil per GIF** (median, ~34% piksel putih) plus
+**ordered dithering Bayer 4x4 hanya di piksel yang dekat ambang** (±15).
+Interior dan background tetap solid/bersih, sedangkan pinggiran jadi lebih
+halus (tidak kotak-kotak) di OLED 1-bit. Catatan: OLED 128x64 cuma bisa
+hitam/putih, jadi gradasi GIF tetap akan tampil sebagai pola titik halus —
+bukan bug, tapi keterbatasan layar.
 
 File animasi lama (`dasai_frames.h`, `mochi_gif.h`, `mochi_frames.h`) sudah
 dihapus. `include/mochi_web_gif.h` berisi versi kecil `happy.gif` untuk
@@ -450,6 +453,7 @@ endpoint `/mochi.gif`.
 |---|---|
 | ganti GIF mood/idle | edit `$gifs` di `tools/make_mood_frames.ps1`, lalu jalankan `powershell -File tools\make_mood_frames.ps1` |
 | crop / target kecerahan | `-CropX -CropY -CropW -CropH -TargetWhite -MinThreshold` di script tersebut |
+| kehalusan pinggiran | `-DitherAmp` / `-DitherBand` di script tersebut (0 = matikan dithering) |
 | kecepatan animasi | `MOOD_DELAYS` di `include/mood_frames.h` (unit 10 ms) |
 | label mood kecil | `drawMoodBadge()` di `src/main.cpp` |
 
