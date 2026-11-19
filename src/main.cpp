@@ -25,6 +25,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <esp_system.h>        // esp_random() untuk ekspresi acak
+#include <esp_timer.h>         // esp_timer_get_time() untuk waktu tombol di ISR
+#include <driver/gpio.h>       // gpio_get_level() di ISR tombol
 #include <math.h>
 #include <string.h>
 
@@ -235,6 +237,12 @@ static void addNotification(const char* src, const char* from, const char* text)
   inbox[0].unread = true;
   if (inboxCount < INBOX_MAX) inboxCount++;
   if (unreadCount < 99) unreadCount++;
+  // Notif langsung terlihat. Sewaktu buzzer dicabut, tidak ada lagi bunyi yang
+  // menandakan pesan masuk, jadi layar NOTIF yang jadi penandanya.
+  if (screen != SCR_EAT && screen != SCR_MOOD) {
+    screen = SCR_MSG;
+    noteIndex = 0;
+  }
   Serial.printf("[%s] %s: %s\n", inbox[0].src, inbox[0].from, inbox[0].text);
 }
 
@@ -535,8 +543,8 @@ static bool fetchWeather(float lat, float lon) {
   tls.setInsecure();                       // open-meteo tanpa pinning
 
   HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(8000);
+  http.setConnectTimeout(3500);
+  http.setTimeout(6000);
 
   char url[260];
   snprintf(url, sizeof(url),
@@ -599,8 +607,8 @@ static void geoIpTask() {
   WiFiClientSecure tls;
   tls.setInsecure();
   HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(8000);
+  http.setConnectTimeout(3500);
+  http.setTimeout(6000);
   if (!http.begin(tls, "https://ipwho.is/")) return;
 
   int code = http.GET();
@@ -773,8 +781,8 @@ static void telegramTask() {
   if (!tlsInit) {
     tls.setInsecure();
     http.setReuse(true);
-    http.setConnectTimeout(5000);
-    http.setTimeout(8000);
+    http.setConnectTimeout(3000);
+    http.setTimeout(4000);
     tlsInit = true;
   }
 
@@ -1490,10 +1498,27 @@ static void render() {
 }
 
 // ------------------------------------------------------------ tombol
-static const uint32_t LONG_PRESS_MS = 700;
-static bool     btnDown   = false;
-static uint32_t btnAt     = 0;
-static bool     longFired = false;
+static const uint32_t LONG_PRESS_MS = 500;
+
+// Edge tombol dicatat di interrupt, bukan cuma di-polling di loop. Kalau loop
+// sedang sibuk (fetch HTTPS/Telegram), durasi tahan tetap terukur benar dan
+// tahan panjang tidak salah jadi sentuhan pendek.
+struct BtnEdge { int64_t us; bool down; };
+static volatile BtnEdge btnEdgeQ[4];
+static volatile uint8_t btnEdgeHead  = 0;
+static volatile uint8_t btnEdgeCount = 0;
+static int64_t          btnLastIrqUs = 0;
+
+static void IRAM_ATTR btnIsr() {
+  int64_t t = esp_timer_get_time();
+  if (t - btnLastIrqUs < 15000) return;          // debounce 15 ms
+  btnLastIrqUs = t;
+  uint8_t h = btnEdgeHead;
+  btnEdgeQ[h].us   = t;
+  btnEdgeQ[h].down = gpio_get_level((gpio_num_t)PIN_BTN) == (BTN_ACTIVE ? 1 : 0);
+  btnEdgeHead = (h + 1) & 3;
+  if (btnEdgeCount < 4) ++btnEdgeCount;
+}
 
 static void onShortPress() {
   uint32_t now = millis();
@@ -1567,30 +1592,41 @@ static void onLongPress() {
 
 static void updateButton() {
   if (!HAS_BUTTON) return;
-  uint32_t now = millis();
 
-  // Stabilkan sinyal (tombol mekanis maupun TTP223 bisa bergetar sebentar).
-  static bool rawPrev = false;
-  static uint32_t rawAt = 0;
-  bool raw = digitalRead(PIN_BTN) == BTN_ACTIVE;
-  if (raw != rawPrev) {
-    rawPrev = raw;
-    rawAt = now;
-    return;
+  static bool     held      = false;
+  static int64_t  downUs    = 0;
+  static bool     longFired = false;
+  int64_t nowUs = esp_timer_get_time();
+
+  // Antrean edge: kalau loop sempat terblokir, tekan ANTARA blok itu tetap
+  // tercatat (dulu cuma edge terakhir yang tersimpan, jadi bisa hilang).
+  while (btnEdgeCount) {
+    noInterrupts();
+    uint8_t n   = btnEdgeCount;
+    uint8_t idx = (btnEdgeHead + 4 - n) & 3;
+    BtnEdge e;
+    e.us   = btnEdgeQ[idx].us;
+    e.down = btnEdgeQ[idx].down;
+    btnEdgeCount = n - 1;
+    interrupts();
+
+    if (e.down && !held) {
+      held = true; downUs = e.us; longFired = false;
+    } else if (!e.down && held) {
+      uint32_t ms = (uint32_t)((e.us - downUs) / 1000);
+      held = false;
+      if (!longFired) {
+        if (ms >= LONG_PRESS_MS) onLongPress();
+        else if (ms >= 30)       onShortPress();
+      }
+    }
   }
-  if ((uint32_t)(now - rawAt) < 25) return;
-  bool down = raw;
 
-  if (down && !btnDown) {
-    btnDown   = true;
-    btnAt     = now;
-    longFired = false;
-  } else if (down && btnDown && !longFired && now - btnAt > LONG_PRESS_MS) {
+  // Tahan panjang dieksekusi begitu ambang tercapai, tanpa menunggu dilepas.
+  if (held && !longFired &&
+      (uint32_t)((nowUs - downUs) / 1000) >= LONG_PRESS_MS) {
     longFired = true;
     onLongPress();
-  } else if (!down && btnDown) {
-    btnDown = false;
-    if (!longFired && now - btnAt > 30) onShortPress();
   }
 }
 
@@ -1721,7 +1757,9 @@ static void handleSerialLine(const char* line) {
 }
 
 static void updateSerialInput() {
-  static char  line[160];
+  // Bridge bisa mengirim N<pengirim>|<pesan> sampai ~180 karakter. Buffer lama
+  // 160 bikin pesan panjang terpotong/terbuang dan kadang terbaca sebagai tombol.
+  static char  line[256];
   static uint8_t n = 0;
 
   while (Serial.available()) {
@@ -2805,6 +2843,7 @@ void setup() {
   if (HAS_BUTTON) {
     // Tombol ke GND aktif LOW; TTP223 aktif HIGH.
     pinMode(PIN_BTN, BTN_ACTIVE == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
+    attachInterrupt(digitalPinToInterrupt(PIN_BTN), btnIsr, CHANGE);
   }
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);

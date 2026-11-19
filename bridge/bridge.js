@@ -17,7 +17,9 @@ const { SerialPort } = require('serialport');
 const ESP_PORT     = process.env.ESP_PORT || 'COM8';
 const BAUD         = 115200;
 const IGNORE_GROUPS = process.env.IGNORE_GROUPS === '1';
-const IGNORE_SELF   = process.env.IGNORE_SELF !== '0';
+// Default: pesan ke diri sendiri TETAP diteruskan (biar notifikasi mudah diuji).
+// Set IGNORE_SELF=1 kalau memang mau mengabaikannya.
+const IGNORE_SELF   = process.env.IGNORE_SELF === '1';
 
 // Jam & cuaca juga dikirim lewat kabel (ESP32 tidak perlu WiFi WiFi rumah).
 const WX_LAT        = process.env.WX_LAT ? parseFloat(process.env.WX_LAT) : null;
@@ -176,7 +178,8 @@ client.on('qr', (qr) => {
   // Cadangan kalau karakter QR di terminal berantakan (encoding Windows):
   // isi file ini bisa di-scan lewat aplikasi QR scanner mana pun.
   try { fs.writeFileSync('./qr.txt', qr); } catch (_) {}
-  console.log('\nScan QR ini di WhatsApp > Perangkat tertaut:\n');
+  console.log('\n[wa] Sesi perlu dihubungkan ulang. Scan QR di WhatsApp > Perangkat tertaut.');
+  console.log('     Kalau QR di terminal berantakan, scan isi file bridge/qr.txt.\n');
   qrcode.generate(qr, { small: true });
 });
 

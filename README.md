@@ -313,6 +313,12 @@ Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
   4 Lapar) — berguna untuk uji animasi tanpa WiFi/HP,
 - `B<level>|<0/1>\n` baterai iPhone (%) + status mengisi (juga bisa dari web).
 
+Notifikasi WA/Telegram/MQTT langsung membuka layar **NOTIF** di OLED (kecuali
+sedang makan atau memilih mood), jadi pesan tidak perlu dicari dengan tombol.
+
+Pesan ke nomor sendiri ikut diteruskan secara default, supaya mudah diuji. Set
+`IGNORE_SELF=1` kalau memang ingin diabaikan.
+
 Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi
 ESP32 tidak perlu join WiFi `WiFi rumah` supaya jam/cuaca/notif WA jalan. GPS tetap
 membaca modulnya sendiri (butuh fix satelit, taruh di luar ruangan); kalau tidak
