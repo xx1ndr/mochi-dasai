@@ -170,8 +170,9 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
   > Jalankan `bridge\lokasi_hp.bat` (cloudflared sudah terpasang), lalu buka URL
   > `https://...` yang muncul di HP dan izinkan akses lokasi. Setelah itu
   > `watchPosition()` mengirim koordinat ke `/location?src=hp` setiap kali
-  > bergeser ≥10 m (maksimal 1 kali per 10 detik) — cukup untuk navigasi tanpa
-  > membanjiri ESP32 dengan request cuaca.
+  > bergeser ≥5 m (maksimal 1 kali per 5 detik). Pengiriman ini tidak memicu
+  > fetch cuaca: cuaca hanya diambil ulang kalau posisi berubah jauh, paling
+  > cepat tiap 5 menit — jadi web, OLED, dan navigasi tetap responsif.
 
   > Tanpa internet, cuaca & Telegram tidak jalan. `AP_ONLY` sudah `0`, jadi ESP32
   > jadi hotspot **dan** ikut WiFi rumah sekaligus. Isi `WIFI_SSID`/`WIFI_PASS`
@@ -454,7 +455,8 @@ Cukup masukkan tujuan, ESP32 yang menentukan belokannya:
    dikirim halaman web (`/location?src=hp`) → modul GPS → geolokasi IP → titik
    default `HOME_LAT/HOME_LON`. Buka halaman web di HP lewat tunnel HTTPS
    (`lokasi_hp.bat`) dan biarkan **Ikuti lokasi HP otomatis** aktif; posisi HP
-   dikirim otomatis lewat `watchPosition()` setiap bergeser ≥10 m.
+   dikirim otomatis lewat `watchPosition()` setiap bergeser ≥5 m (maks. 1× per
+   5 detik).
 2. Buka halaman web → **navigasi otomatis**.
 3. Ketik nama tempat di **Cari tempat** (misal `Monas Jakarta`) → klik **Cari**;
    koordinat tujuan otomatis terisi. Boleh juga isi `latitude`/`longitude`

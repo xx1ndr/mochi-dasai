@@ -268,11 +268,14 @@ static void setPhoneBattery(int level, bool charging) {
 
 // Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau GPS tidak fix.
 // fromPhone=true kalau sumbernya GPS HP (browser geolocation lewat /location?src=hp).
-static void saveWxLocation(float lat, float lon, bool fromPhone = false) {
-  prefs.putBool("wxlocset", true);
-  prefs.putBool("wxlocphone", fromPhone);
-  prefs.putFloat("wxlat", lat);
-  prefs.putFloat("wxlon", lon);
+static void saveWxLocation(float lat, float lon, bool fromPhone = false,
+                           bool persist = true) {
+  if (persist) {
+    prefs.putBool("wxlocset", true);
+    prefs.putBool("wxlocphone", fromPhone);
+    prefs.putFloat("wxlat", lat);
+    prefs.putFloat("wxlon", lon);
+  }
   wxLat = lat; wxLon = lon; wxLocSet = true; wxLocPhone = fromPhone;
 }
 static void clearWxLocation() {
@@ -645,17 +648,27 @@ static void weatherTask() {
     lon = HOME_LON;
   }
 
-  // Lokasi berubah jauh -> ambil cuaca baru sekarang, bukan tunggu 10 menit.
-  if (isnan(usedLat) || fabs(lat - usedLat) > 0.01f || fabs(lon - usedLon) > 0.01f) {
-    usedLat = lat;
-    usedLon = lon;
-    forceWeather = true;
-  }
+  uint32_t now = millis();
 
-  if (forceWeather) { forceWeather = false; lastTry = 0; }
+  // Permintaan manual (menu Cuaca / reset lokasi) tetap dijalankan segera.
+  if (forceWeather) {
+    forceWeather = false;
+    lastTry = 0;
+  } else {
+    // Lokasi HP dikirim tiap beberapa detik. Kalau tiap perubahan langsung
+    // fetch HTTPS, loop ESP32 terblokir 2-7 detik web/navigasi/OLED jadi lag.
+    // Batasi refresh cuaca karena perubahan posisi maksimal tiap 5 menit.
+    bool jauh = isnan(usedLat) ||
+                fabs(lat - usedLat) > 0.01f || fabs(lon - usedLon) > 0.01f;
+    if (jauh) {
+      usedLat = lat;
+      usedLon = lon;
+      if (lastTry != 0 && now - lastTry < 300000UL) return;
+      lastTry = 0;
+    }
+  }
   if (WiFi.status() != WL_CONNECTED) return;
 
-  uint32_t now      = millis();
   uint32_t interval = wx.valid ? 600000UL : 15000UL;  // 10 menit / coba 15 detik
   if (lastTry != 0 && now - lastTry < interval) return;
   lastTry = now;
@@ -1892,11 +1905,11 @@ function geoStatus(txt,color){$('geoErr').style.color=color||'#888';$('geoErr').
 function kirimLokasi(lat,lon,sumber,dariHp){
   const now=Date.now();
   if(dariHp){
-    if(now-lastSend<10000) return;                 // throttle: 1 kirim / 10 detik
+    if(now-lastSend<5000) return;                  // throttle: 1 kirim / 5 detik
     if(lastLat!==null){
       const dy=(lat-lastLat)*111000;
       const dx=(lon-lastLon)*111000*Math.cos(lat*Math.PI/180);
-      if(dx*dx+dy*dy<100) return;                  // belum bergeser 10 meter
+      if(dx*dx+dy*dy<25) return;                   // belum bergeser 5 meter
     }
   }
   lastSend=now; lastLat=lat; lastLon=lon;
@@ -2399,10 +2412,20 @@ static void setupWeb() {
       float lo = web.arg("lon").toFloat();
       if (la >= -90.0f && la <= 90.0f && lo >= -180.0f && lo <= 180.0f) {
         bool fromPhone = web.arg("src") == "hp";
-        saveWxLocation(la, lo, fromPhone);
-        forceWeather = true;
-        Serial.printf("[cuaca] lokasi diset: %.4f,%.4f (%s)\n", la, lo,
-                      fromPhone ? "HP" : "web");
+        // HP mengirim tiap beberapa detik: cukup update di RAM. Tulis NVS
+        // maksimal 1x/menit supaya flash tidak cepat aus.
+        static uint32_t lastPersist = 0;
+        bool persist = !fromPhone || lastPersist == 0 ||
+                       (int32_t)(millis() - lastPersist) >= 60000;
+        saveWxLocation(la, lo, fromPhone, persist);
+        if (persist) lastPersist = millis();
+        // Jangan paksa fetch cuaca tiap kirim lokasi HP (HTTPS blocking).
+        // weatherTask() akan ambil cuaca baru kalau posisi berubah jauh,
+        // maksimal tiap 5 menit.
+        if (!fromPhone) forceWeather = true;
+        if (persist || !fromPhone)
+          Serial.printf("[cuaca] lokasi diset: %.4f,%.4f (%s)\n", la, lo,
+                        fromPhone ? "HP" : "web");
       }
     }
     char out[96];
