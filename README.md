@@ -298,6 +298,14 @@ set PUPPETEER_SKIP_DOWNLOAD=1 && npm install   # Windows CMD
 npm start
 ```
 
+Cara paling gampang di Windows: **klik 2× `bridge\start_bridge.bat`** (jendela
+terminal tetap terbuka, jangan ditutup). Status bridge bisa dicek kapan saja di
+`bridge\bridge_status.txt`: `SIAP`, `PERLU QR`, atau `TERPUTUS`.
+
+> Kalau status `PERLU QR`, sesi WhatsApp-nya kedaluwarsa (wajar untuk client
+> tidak resmi). Scan `bridge\qr.txt` di WhatsApp → **Perangkat tertaut**.
+> Selama QR belum di-scan, pesan WA tidak akan diteruskan ke ESP32.
+
 `bridge.js` memakai Chrome yang sudah terpasang di
 `C:\Program Files\Google\Chrome\Application\chrome.exe` (Lewati unduhan Chromium
 Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.

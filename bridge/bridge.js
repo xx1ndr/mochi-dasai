@@ -32,6 +32,14 @@ const SYNC_INTERVAL = 10 * 60 * 1000;   // kirim ulang tiap 10 menit
 const CHROME_PATH = process.env.CHROME_PATH ||
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
+// Status bisa dicek tanpa terminal: bridge/bridge_status.txt
+function tulisStatus(teks) {
+  try {
+    fs.writeFileSync('./bridge_status.txt',
+      `${new Date().toLocaleString('id-ID')} - ${teks}\n`);
+  } catch (_) {}
+}
+
 // ---------------- koneksi serial ke ESP32 ----------------
 let esp = null;
 
@@ -178,6 +186,7 @@ client.on('qr', (qr) => {
   // Cadangan kalau karakter QR di terminal berantakan (encoding Windows):
   // isi file ini bisa di-scan lewat aplikasi QR scanner mana pun.
   try { fs.writeFileSync('./qr.txt', qr); } catch (_) {}
+  tulisStatus('PERLU QR - scan bridge/qr.txt di WhatsApp > Perangkat tertaut');
   console.log('\n[wa] Sesi perlu dihubungkan ulang. Scan QR di WhatsApp > Perangkat tertaut.');
   console.log('     Kalau QR di terminal berantakan, scan isi file bridge/qr.txt.\n');
   qrcode.generate(qr, { small: true });
@@ -185,23 +194,28 @@ client.on('qr', (qr) => {
 
 client.on('auth_failure', (msg) => {
   console.error('[wa] gagal login:', msg);
+  tulisStatus('GAGAL LOGIN - hapus folder session lalu jalankan ulang');
 });
 
 client.on('authenticated', () => {
   console.log('[wa] tersimpan, menunggu siap...');
+  tulisStatus('TERAUTENTIKASI - menunggu WhatsApp Web siap');
 });
 
 client.on('ready', () => {
   console.log(`[wa] siap. notifikasi dikirim lewat kabel ${ESP_PORT}`);
+  tulisStatus(`SIAP - menunggu pesan WA, dikirim ke ${ESP_PORT}`);
 });
 
 client.on('disconnected', (reason) => {
   console.log('[wa] terputus:', reason);
+  tulisStatus('TERPUTUS - jalankan start_bridge.bat lagi');
   process.exit(1);
 });
 
 client.on('message', async (msg) => {
   const body = (msg.body || '').trim();
+  console.log(`[wa] pesan masuk: ${msg.from} self=${msg.fromMe} grup=${msg.isGroup} "${body.slice(0, 60)}"`);
 
   // Baterai dari Shortcuts iPhone: "#batt 85 1" (level, 1=mengisi).
   // Diproses sebelum filter IGNORE_SELF karena shortcut kirim ke diri sendiri.
@@ -216,8 +230,8 @@ client.on('message', async (msg) => {
     return;
   }
 
-  if (IGNORE_GROUPS && msg.isGroup) return;
-  if (IGNORE_SELF && msg.fromMe) return;
+  if (IGNORE_GROUPS && msg.isGroup) { console.log('[wa] diabaikan: pesan grup'); return; }
+  if (IGNORE_SELF && msg.fromMe) { console.log('[wa] diabaikan: pesan sendiri'); return; }
 
   let from = msg.from.replace(/@c\.us$/, '').replace(/@g\.us$/, '');
   try {
