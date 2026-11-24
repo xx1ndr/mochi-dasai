@@ -289,12 +289,12 @@ Tidak butuh PC menyala, tidak melanggar ToS.
 
 ### Opsi C — Bridge Node.js (`bridge/`)
 
-Pakai `whatsapp-web.js` (tidak resmi, **nomor bisa kena ban** — pakai nomor cadangan).
+Pakai **Baileys** (protobuf langsung, tidak butuh Chrome / Puppeteer). Tetap client
+tidak resmi, **nomor bisa kena ban** — sebaiknya pakai nomor cadangan.
 
 ```bash
 cd bridge
-set PUPPETEER_SKIP_DOWNLOAD=1 && npm install   # Windows CMD
-# PowerShell: $env:PUPPETEER_SKIP_DOWNLOAD=1; npm install
+npm install
 npm start
 ```
 
@@ -306,12 +306,12 @@ terminal tetap terbuka, jangan ditutup). Status bridge bisa dicek kapan saja di
 > tidak resmi). Scan `bridge\qr.txt` di WhatsApp → **Perangkat tertaut**.
 > Selama QR belum di-scan, pesan WA tidak akan diteruskan ke ESP32.
 
-`bridge.js` memakai Chrome yang sudah terpasang di
-`C:\Program Files\Google\Chrome\Application\chrome.exe` (Lewati unduhan Chromium
-Puppeteer yang sering gagal). Kalau Chrome di path lain, set env `CHROME_PATH`.
+`npm start` menjalankan `bridge_baileys.js`. Bridge lama berbasis Chrome
+(`bridge.js`, `whatsapp-web.js`) ditinggalkan karena WhatsApp Web sekarang
+mengubah struktur internal sampai library itu gagal membaca QR-nya.
 
 **Notifikasi, jam, dan cuaca dikirim lewat KABEL USB (serial), bukan WiFi.**
-`bridge.js` membuka port `COM8` (115200 baud) dan menulis:
+Bridge membuka port `COM8` (115200 baud) dan menulis:
 
 - `N<pengirim>|<pesan>\n` untuk tiap pesan WhatsApp masuk,
 - `T<epoch>\n` jam dari PC (firmware yang konversi ke WIB),
@@ -341,15 +341,14 @@ $env:ESP_PORT="COM3"; npm start  # PowerShell
 > Port COM8 harus bebas saat bridge jalan. Kalau mau upload firmware, matikan
 > bridge dulu (`Ctrl+C`), karena Arduino CLI butuh port yang sama.
 
-Scan QR yang muncul di terminal (WhatsApp > Perangkat tertaut). Kalau karakter
-QR berantakan di terminal Windows, buka file `bridge/qr.txt` dan scan isinya
-dengan aplikasi QR scanner. Sesi login disimpan di folder `bridge/session`,
-jadi tidak perlu scan QR tiap kali.
+Scan QR yang muncul di terminal (WhatsApp > Perangkat tertaut). Alternatifnya,
+buka `bridge/qr.txt` atau `bridge/qr.png` dengan aplikasi QR scanner. Sesi login
+disimpan di folder `bridge/baileys_session`, jadi tidak perlu scan QR tiap kali.
 
-> **Bridge nyangkut / timeout di `Client.inject`?**
-> Profil sesi lama bisa bikin WhatsApp Web redirect ke halaman `/login/` yang
-> tidak dikenali library. Hapus folder `bridge/session` lalu jalankan ulang
-> `npm start` (QR baru akan muncul). Ini aman kalau belum pernah berhasil login.
+> **QR tidak muncul / status `PERLU QR` terus?**
+> Hapus folder `bridge/baileys_session`, lalu jalankan ulang `npm start`. Ini aman
+> kalau belum pernah berhasil login. Jangan jalankan dua bridge bersamaan karena
+> sama-sama memakai COM8.
 
 ### Opsi D — MQTT (kalau sudah punya broker)
 
