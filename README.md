@@ -74,6 +74,26 @@ OLED di GPIO20/21, GPS di GPIO4/5.
 > GPS NEO-6M menarik ~50 mA saat mencari satelit. Dari USB aman.
 > Kalau pakai baterai LiPo 3.7V, jangan langsung ke pin 5V/3V3 — pakai boost/regulator.
 
+### OLED 1.3 inch + baterai + modul cas + sakelar ON/OFF
+
+Diagram kabel lengkap (PDF + PNG) ada di [`docs/wiring_mochi.pdf`](docs/wiring_mochi.pdf)
+dan [`docs/wiring_mochi.png`](docs/wiring_mochi.png).
+
+Ringkasan:
+
+| Bagian | Koneksi |
+|---|---|
+| OLED 1.3" SH1106 | VCC→3V3, GND→GND, SDA→GPIO20, SCL→GPIO21. `OLED_SH1106 1` di `config.h`. |
+| TP4056 | USB 5V→IN+/-, baterai→B+/B-, OUT+/-→boost. |
+| Baterai Li-ion 1 sel | B+ / B- TP4056. Jangan langsung ke ESP32. |
+| Boost MT3608 | Set dulu ke **5.0 V**, IN dari OUT TP4056. |
+| Sakelar ON/OFF | SPST seri di jalur 5V boost → ESP32 5V/VIN. |
+| ADC baterai | B+ → 100k → GPIO1 → 100k → GND (rasio 2:1, aman untuk ADC 3.3V). |
+| CHRG TP4056 | CHRG → GPIO2 (aktif LOW saat mengisi; tambah pull-up 10k ke 3V3 bila perlu). |
+
+Baterai hardware ditampilkan di layar **BATERAI** dan `/api/status` (prioritas
+di atas baterai iPhone). GPS TX ke GPIO5 boleh tidak dipasang.
+
 ---
 
 ## 3. Build & upload

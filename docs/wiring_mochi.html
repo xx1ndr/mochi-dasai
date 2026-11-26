@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Wiring mochi dasai - bentuk modul &amp; pin</title>
+<style>
+  @page { size: A3 landscape; margin: 8mm; }
+  body { font-family: Arial, sans-serif; margin:0; background:#fff; color:#111; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  .sub { font-size:12px; color:#555; margin-bottom:6px; }
+  svg { width:100%; height:auto; border:1px solid #bbb; }
+</style>
+</head>
+<body>
+<h1>Wiring mochi dasai - ESP32-C3 Super Mini (bentuk modul &amp; pin)</h1>
+<div class="sub">OLED 1.3" SH1106 - GPS - TTP223 - TP4056 - Li-ion - boost 5V - sakelar ON/OFF - ADC baterai</div>
+<svg viewBox="0 0 1600 1900" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<style>
+  .pcb { fill:#eef4e8; stroke:#2c5; stroke-width:2.5; rx:8; }
+  .pcby { fill:#fff8e0; stroke:#d90; stroke-width:2.5; rx:8; }
+  .pcbb { fill:#eaf1fb; stroke:#27c; stroke-width:2.5; rx:8; }
+  .screen { fill:#202a35; stroke:#000; stroke-width:2; rx:4; }
+  .chip { fill:#d8dde3; stroke:#445; stroke-width:2; rx:5; }
+  .pin { fill:#caa02a; stroke:#6b4e00; stroke-width:1; }
+  .pinb { fill:#e8e8e8; stroke:#333; stroke-width:1; }
+  .t { font:bold 15px Arial; fill:#122; }
+  .s { font:12px Arial; fill:#222; }
+  .tiny { font:10px Arial; fill:#222; }
+  .pinlbl { font:bold 10px Arial; fill:#123; }
+  .w { stroke-width:3; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+  .red { stroke:#d00; } .blk { stroke:#111; } .blu { stroke:#1672c8; }
+  .grn { stroke:#1a8b3a; } .org { stroke:#e07f00; } .pur { stroke:#7a3fb5; }
+  .lbl { font:10px Arial; fill:#222; }
+  .head { font:bold 16px Arial; fill:#123; }
+</style>
+</defs>
+
+<!-- USB source -->
+<rect class="pcby" x="60" y="110" width="280" height="80"/>
+<rect x="70" y="135" width="40" height="30" rx="4" fill="#ccc" stroke="#444"/>
+<text class="t" x="125" y="142">USB 5V</text>
+<text class="s" x="125" y="162">dari charger / PC COM8</text>
+<circle class="pin" cx="100" cy="190" r="5"/><text class="pinlbl" x="80" y="185">5V</text>
+<circle class="pinb" cx="300" cy="190" r="5"/><text class="pinlbl" x="285" y="185">GND</text>
+
+<!-- TP4056 -->
+<rect class="pcby" x="60" y="260" width="300" height="220"/>
+<rect x="45" y="300" width="30" height="45" rx="3" fill="#bbb" stroke="#444"/>
+<text class="t" x="95" y="290">TP4056</text>
+<text class="s" x="95" y="310">Modul cas Li-ion</text>
+<circle cx="300" cy="300" r="8" fill="red"/><text class="tiny" x="312" y="304">CHRG</text>
+<circle cx="300" cy="330" r="8" fill="#3c3"/><text class="tiny" x="312" y="334">STDBY</text>
+<circle class="pin" cx="90" cy="480" r="5"/><text class="pinlbl" x="75" y="472">IN+</text>
+<circle class="pinb" cx="130" cy="480" r="5"/><text class="pinlbl" x="115" y="472">IN-</text>
+<circle class="pin" cx="180" cy="480" r="5"/><text class="pinlbl" x="168" y="472">B+</text>
+<circle class="pinb" cx="220" cy="480" r="5"/><text class="pinlbl" x="207" y="472">B-</text>
+<circle class="pin" cx="275" cy="480" r="5"/><text class="pinlbl" x="262" y="472">OUT+</text>
+<circle class="pinb" cx="320" cy="480" r="5"/><text class="pinlbl" x="307" y="472">OUT-</text>
+<circle class="pin" cx="340" cy="285" r="5"/><text class="pinlbl" x="348" y="289">CHRG</text>
+
+<!-- Battery -->
+<rect x="60" y="560" width="260" height="100" rx="22" fill="#e8eef5" stroke="#247" stroke-width="2.5"/>
+<text class="t" x="85" y="605">Li-ion 1 sel</text>
+<text class="s" x="85" y="628">3.7V / 4.2V penuh</text>
+<circle class="pin" cx="320" cy="585" r="5"/><text class="pinlbl" x="330" y="589">+</text>
+<circle class="pinb" cx="320" cy="635" r="5"/><text class="pinlbl" x="330" y="639">-</text>
+
+<!-- Boost -->
+<rect class="pcby" x="60" y="730" width="300" height="150"/>
+<text class="t" x="75" y="758">Boost MT3608</text>
+<circle cx="210" cy="805" r="28" fill="#d6d6d6" stroke="#555" stroke-width="2"/>
+<line x1="190" y1="805" x2="230" y2="805" stroke="#333" stroke-width="3"/>
+<text class="tiny" x="75" y="790">Set dulu 5.0V</text>
+<text class="tiny" x="75" y="810">lewat pot ini</text>
+<circle class="pin" cx="110" cy="880" r="5"/><text class="pinlbl" x="95" y="872">IN+</text>
+<circle class="pinb" cx="160" cy="880" r="5"/><text class="pinlbl" x="145" y="872">IN-</text>
+<circle class="pin" cx="250" cy="880" r="5"/><text class="pinlbl" x="235" y="872">OUT+</text>
+<circle class="pinb" cx="310" cy="880" r="5"/><text class="pinlbl" x="295" y="872">OUT-</text>
+
+<!-- Switch -->
+<rect class="pcbb" x="60" y="970" width="300" height="90"/>
+<text class="t" x="75" y="995">Sakelar ON/OFF (SPST)</text>
+<circle class="pin" cx="120" cy="1030" r="6"/><circle class="pin" cx="240" cy="1030" r="6"/>
+<line x1="120" y1="1030" x2="215" y2="1005" stroke="#111" stroke-width="4"/>
+<text class="tiny" x="255" y="1035">seri di jalur +5V</text>
+
+<!-- ESP32 board -->
+<rect class="pcb" x="560" y="300" width="340" height="620"/>
+<rect x="690" y="278" width="80" height="24" rx="3" fill="#aaa" stroke="#444" stroke-width="2"/>
+<text class="head" x="585" y="340">ESP32-C3 Super Mini</text>
+<rect class="chip" x="665" y="440" width="130" height="120"/>
+<text class="t" x="680" y="492">ESP32-C3</text>
+<text class="tiny" x="680" y="512">WiFi + BLE</text>
+<!-- left pins -->
+<circle class="pin" cx="560" cy="380" r="5"/><text class="pinlbl" x="575" y="384">5V / VIN</text>
+<circle class="pinb" cx="560" cy="420" r="5"/><text class="pinlbl" x="575" y="424">GND</text>
+<circle class="pin" cx="560" cy="460" r="5"/><text class="pinlbl" x="575" y="464">3V3</text>
+<circle class="pin" cx="560" cy="560" r="5"/><text class="pinlbl" x="575" y="564">GPIO1 ADC</text>
+<circle class="pin" cx="560" cy="600" r="5"/><text class="pinlbl" x="575" y="604">GPIO2 CHRG</text>
+<!-- right pins -->
+<circle class="pin" cx="900" cy="380" r="5"/><text class="pinlbl" x="885" y="384" text-anchor="end">GPIO20 SDA</text>
+<circle class="pin" cx="900" cy="420" r="5"/><text class="pinlbl" x="885" y="424" text-anchor="end">GPIO21 SCL</text>
+<circle class="pin" cx="900" cy="500" r="5"/><text class="pinlbl" x="885" y="504" text-anchor="end">GPIO4 RX</text>
+<circle class="pin" cx="900" cy="540" r="5"/><text class="pinlbl" x="885" y="544" text-anchor="end">GPIO5 TX</text>
+<circle class="pin" cx="900" cy="580" r="5"/><text class="pinlbl" x="885" y="584" text-anchor="end">GPIO3 TOUCH</text>
+<text class="s" x="585" y="640">USB-C atas = bridge WA (COM8)</text>
+<text class="s" x="585" y="665">Semua GND HARUS satu titik</text>
+<text class="s" x="585" y="690">Baterai jangan langsung ke 3V3/5V</text>
+<text class="s" x="585" y="715">AP: mochi-dasai / mochi1234</text>
+<text class="s" x="585" y="740">Web: http://192.168.4.1</text>
+<text class="s" x="585" y="785">OLED_SH1106 = 1 (1.3 inch)</text>
+
+<!-- OLED -->
+<rect class="pcbb" x="1080" y="140" width="300" height="180"/>
+<rect class="screen" x="1100" y="158" width="260" height="110"/>
+<text x="1125" y="220" fill="#7fd1ff" font-family="Arial" font-size="18">OLED 1.3"</text>
+<text x="1125" y="245" fill="#7fd1ff" font-family="Arial" font-size="12">SH1106 128x64 - 0x3C</text>
+<circle class="pin" cx="1115" cy="320" r="5"/><text class="pinlbl" x="1102" y="340">VCC</text>
+<circle class="pinb" cx="1160" cy="320" r="5"/><text class="pinlbl" x="1148" y="340">GND</text>
+<circle class="pin" cx="1205" cy="320" r="5"/><text class="pinlbl" x="1193" y="340">SCL</text>
+<circle class="pin" cx="1250" cy="320" r="5"/><text class="pinlbl" x="1238" y="340">SDA</text>
+
+<!-- GPS -->
+<rect class="pcbb" x="1080" y="400" width="300" height="180"/>
+<rect x="1100" y="418" width="75" height="75" rx="4" fill="#c8b48a" stroke="#765" stroke-width="2"/>
+<text class="tiny" x="1105" y="460">GPS</text>
+<text class="t" x="1190" y="440">NEO-6M</text>
+<text class="s" x="1190" y="462">/ ATGM336H</text>
+<circle class="pin" cx="1115" cy="580" r="5"/><text class="pinlbl" x="1102" y="600">VCC</text>
+<circle class="pinb" cx="1160" cy="580" r="5"/><text class="pinlbl" x="1148" y="600">GND</text>
+<circle class="pin" cx="1205" cy="580" r="5"/><text class="pinlbl" x="1193" y="600">TX</text>
+<circle class="pin" cx="1250" cy="580" r="5"/><text class="pinlbl" x="1238" y="600">RX</text>
+
+<!-- TTP223 -->
+<rect class="pcbb" x="1080" y="660" width="300" height="140"/>
+<circle cx="1230" cy="715" r="35" fill="#e3e3e3" stroke="#888" stroke-width="2" stroke-dasharray="4 3"/>
+<text class="tiny" x="1200" y="720">sentuh</text>
+<text class="t" x="1095" y="690">TTP223</text>
+<circle class="pin" cx="1140" cy="800" r="5"/><text class="pinlbl" x="1127" y="820">VCC</text>
+<circle class="pinb" cx="1180" cy="800" r="5"/><text class="pinlbl" x="1167" y="820">GND</text>
+<circle class="pin" cx="1240" cy="800" r="5"/><text class="pinlbl" x="1227" y="820">OUT</text>
+
+<!-- resistor divider -->
+<rect class="pcbb" x="560" y="980" width="340" height="200"/>
+<text class="t" x="575" y="1008">Pembagi baterai -&gt; GPIO1</text>
+<circle class="pin" cx="700" cy="1020" r="5"/>
+<rect x="685" y="1030" width="30" height="55" fill="#e8d6a0" stroke="#765" stroke-width="2"/>
+<text class="s" x="725" y="1062">100k</text>
+<circle class="pin" cx="700" cy="1095" r="5"/>
+<rect x="685" y="1105" width="30" height="55" fill="#e8d6a0" stroke="#765" stroke-width="2"/>
+<text class="s" x="725" y="1137">100k</text>
+<circle class="pinb" cx="700" cy="1170" r="5"/>
+<text class="pinlbl" x="715" y="1099">ke GPIO1</text>
+<text class="tiny" x="575" y="1165">B+ 4.2V -&gt; ADC 2.1V (aman)</text>
+
+<!-- ===================== WIRES ===================== -->
+<!-- USB -> TP4056 -->
+<path class="w red" d="M100,190 L100,230 L90,230 L90,480"/>
+<text class="lbl" x="105" y="245">5V</text>
+<path class="w blk" d="M300,190 L300,230 L130,230 L130,480"/>
+<text class="lbl" x="255" y="245">GND</text>
+<!-- TP4056 -> battery -->
+<path class="w red" d="M180,480 L180,520 L320,520 L320,585"/>
+<text class="lbl" x="230" y="515">B+</text>
+<path class="w blk" d="M220,480 L220,545 L320,545 L320,635"/>
+<text class="lbl" x="230" y="540">B-</text>
+<!-- TP4056 -> boost -->
+<path class="w red" d="M275,480 L275,700 L110,700 L110,880"/>
+<text class="lbl" x="285" y="690">OUT+</text>
+<path class="w blk" d="M320,480 L320,690 L160,690 L160,880"/>
+<text class="lbl" x="325" y="685">OUT-</text>
+<!-- boost -> switch -> ESP 5V -->
+<path class="w org" d="M250,880 L250,950 L120,950 L120,1030"/>
+<text class="lbl" x="255" y="945">5V</text>
+<path class="w org" d="M240,1030 L500,1030 L500,380 L560,380"/>
+<text class="lbl" x="430" y="1020">5V setelah switch</text>
+<!-- GND bus -->
+<path class="w blk" d="M400,190 L400,1250"/>
+<path class="w blk" d="M130,480 L400,480"/>
+<path class="w blk" d="M320,635 L400,635"/>
+<path class="w blk" d="M160,880 L400,880"/>
+<path class="w blk" d="M310,880 L400,880"/>
+<path class="w blk" d="M400,420 L560,420"/>
+<text class="lbl" x="410" y="1240">GND bersama</text>
+<!-- 3V3 rail -->
+<path class="w red" d="M560,460 L540,460 L540,260 L1040,260 L1040,300 L1040,800"/>
+<text class="lbl" x="960" y="255">3V3</text>
+<!-- I2C -->
+<path class="w blu" d="M900,380 L1000,380 L1000,350 L1250,350 L1250,320"/>
+<text class="lbl" x="1010" y="345">SDA</text>
+<path class="w blu" d="M900,420 L1020,420 L1020,370 L1205,370 L1205,320"/>
+<text class="lbl" x="1030" y="365">SCL</text>
+<!-- OLED GND -->
+<path class="w blk" d="M1160,320 L1160,100 L400,100 L400,190"/>
+<!-- GPS -->
+<path class="w red" d="M1040,580 L1115,580"/>
+<path class="w blk" d="M1040,620 L1160,620 L1160,580"/>
+<path class="w grn" d="M1205,580 L1050,580 L1050,500 L900,500"/>
+<text class="lbl" x="1000" y="495">TX -&gt; GPIO4</text>
+<path class="w grn" d="M900,540 L1030,540 L1030,580 L1250,580"/>
+<text class="lbl" x="990" y="535">GPIO5 -&gt; RX</text>
+<!-- TTP223 -->
+<path class="w red" d="M1040,800 L1140,800"/>
+<path class="w blk" d="M1040,840 L1180,840 L1180,800"/>
+<path class="w grn" d="M1240,800 L1060,800 L1060,580 L900,580"/>
+<text class="lbl" x="1000" y="575">OUT -&gt; GPIO3</text>
+<!-- battery sense -->
+<path class="w red" d="M320,585 L500,585 L500,1020 L700,1020"/>
+<text class="lbl" x="470" y="1000">B+</text>
+<path class="w pur" d="M700,1095 L760,1095 L760,560 L560,560"/>
+<text class="lbl" x="765" y="800">GPIO1</text>
+<path class="w blk" d="M700,1170 L400,1170"/>
+<!-- CHRG -->
+<path class="w pur" d="M340,285 L480,285 L480,600 L560,600"/>
+<text class="lbl" x="485" y="450">CHRG</text>
+<text class="tiny" x="485" y="470">aktif LOW = mengisi</text>
+
+<!-- legend -->
+<rect x="60" y="1400" width="1480" height="80" rx="6" fill="#f6f6f6" stroke="#aaa"/>
+<text class="head" x="75" y="1430">Legenda</text>
+<line class="w red" x1="180" y1="1445" x2="240" y2="1445"/><text class="s" x="248" y="1449">+ / 3V3</text>
+<line class="w blk" x1="340" y1="1445" x2="400" y2="1445"/><text class="s" x="408" y="1449">GND</text>
+<line class="w org" x1="480" y1="1445" x2="540" y2="1445"/><text class="s" x="548" y="1449">5V setelah sakelar</text>
+<line class="w blu" x1="730" y1="1445" x2="790" y2="1445"/><text class="s" x="798" y="1449">I2C OLED</text>
+<line class="w grn" x1="920" y1="1445" x2="980" y2="1445"/><text class="s" x="988" y="1449">GPS / tombol</text>
+<line class="w pur" x1="1130" y1="1445" x2="1190" y2="1445"/><text class="s" x="1198" y="1449">ADC baterai / CHRG</text>
+
+<text class="s" x="60" y="1520">Catatan: set boost ke 5.0V sebelum disambung. Sakelar memutus jalur +5V. USB-C ESP32 tetap dipakai bridge WhatsApp (COM8).</text>
+<text class="s" x="60" y="1545">Kalau board hanya punya pin 3V3, set boost ke 3.3V dan masuk ke pin 3V3 (jangan ke 5V).</text>
+</svg>
+</body>
+</html>

@@ -67,6 +67,19 @@
 #define PIN_GPS_TX 5    // ESP32 TX  -> GPS RX (boleh tidak disambung)
 #define PIN_BTN    3    // TTP223 OUT (aktif HIGH)
 
+// Baterai Li-ion + modul TP4056.
+// PIN_BAT_ADC = pembagi tegangan baterai (100k atas / 100k bawah) -> GPIO1 (ADC1).
+// PIN_CHRG    = pin CHRG modul TP4056 (open-drain, aktif LOW) -> GPIO2.
+// GPS TX boleh tidak disambung; pin 5 dipakai GPS RX saja.
+#define PIN_BAT_ADC  1
+#define PIN_CHRG     2
+#define HAS_BAT_ADC  1
+#define HAS_CHRG_PIN 1
+#define BAT_DIV_RATIO 2.0f   // (Ratas + Rbawah) / Rbawah
+#define BAT_MIN_MV   3000    // baterai "kosong"
+#define BAT_MAX_MV   4200    // baterai penuh
+#define BAT_SAMPLES  16
+
 // TTP223 keluaran HIGH saat disentuh. Kalau pakai tombol ke GND, ubah ke LOW.
 #define BTN_ACTIVE HIGH
 
@@ -89,5 +102,6 @@
 // Ekspresi dipilih acak + jeda acak (lihat drawFace() di src/main.cpp).
 #define FACE_FRAME_MS 60
 
-// 0 = SSD1306 (paling umum), 1 = SH1106 (kalau tampilan bergeser/noise)
-#define OLED_SH1106 0
+// OLED 1.3" 128x64 umumnya SH1106 (0.96" biasanya SSD1306).
+// 0 = SSD1306, 1 = SH1106. Kalau gambar bergeser/noise, ganti ke 0.
+#define OLED_SH1106 1

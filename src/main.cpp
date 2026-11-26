@@ -185,6 +185,12 @@ static int8_t   phoneBatt     = -1;   // -1 = belum pernah ada data
 static bool     phoneCharging = false;
 static uint32_t phoneBattAt   = 0;
 
+// Baterai hardware ESP32 (pembagi tegangan + pin CHRG TP4056).
+// Kalau tidak ada pembaca hardware, data iPhone yang dipakai.
+static int8_t   hwBatt        = -1;
+static bool     hwCharging    = false;
+static uint32_t hwBattAt      = 0;
+
 // ------------------------------------------------------------ utilitas
 static bool localNow(struct tm* out) {
   time_t now = time(nullptr);
@@ -272,6 +278,41 @@ static void setPhoneBattery(int level, bool charging) {
   nvsSet("batt", (uint32_t)level);
   nvsSet("battchg", charging ? 1u : 0u);
   Serial.printf("[baterai] iPhone %d%% %s\n", level, charging ? "(mengisi)" : "");
+}
+
+/* Baterai yang ditampilkan: hardware ESP32 lebih prioritas kalau ada. */
+static int  battLevel()    { return hwBatt >= 0 ? hwBatt : phoneBatt; }
+static bool battCharging() { return hwBatt >= 0 ? hwCharging : (phoneBatt >= 0 && phoneCharging); }
+static const char* battSource() { return hwBatt >= 0 ? "ESP32" : "iPhone"; }
+
+/* Baca baterai Li-ion lewat pembagi tegangan + pin CHRG TP4056. */
+static void updateHardwareBattery() {
+#if HAS_BAT_ADC
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if (last && (uint32_t)(now - last) < 5000) return;
+  last = now;
+
+  uint32_t sum = 0;
+  for (int i = 0; i < BAT_SAMPLES; ++i) {
+    sum += analogReadMilliVolts((gpio_num_t)PIN_BAT_ADC);
+    delay(2);
+  }
+  int mv = (int)(sum / BAT_SAMPLES * BAT_DIV_RATIO);
+  int pct = (mv - BAT_MIN_MV) * 100 / (BAT_MAX_MV - BAT_MIN_MV);
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+
+  if (hwBatt < 0) hwBatt = (int8_t)pct;
+  else            hwBatt = (int8_t)((hwBatt * 3 + pct) / 4);   // smoothing ringan
+
+#if HAS_CHRG_PIN
+  hwCharging = digitalRead(PIN_CHRG) == LOW;   // CHRG TP4056 aktif LOW
+#endif
+  hwBattAt = now;
+  Serial.printf("[baterai] ESP32 %d%% %u mV %s\n", (int)hwBatt, mv,
+                hwCharging ? "(mengisi)" : "");
+#endif
 }
 
 // Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau GPS tidak fix.
@@ -897,9 +938,9 @@ static void drawStatusBar() {
     snprintf(u, sizeof(u), "msg%u", (unsigned)unreadCount);
     oled.drawStr(127 - oled.getStrWidth(u), 63, u);
   }
-  if (phoneBatt >= 0) {
+  if (battLevel() >= 0) {
     char p[10];
-    snprintf(p, sizeof(p), "%d%%%s", (int)phoneBatt, phoneCharging ? "+" : "");
+    snprintf(p, sizeof(p), "%d%%%s", battLevel(), battCharging() ? "+" : "");
     int px = 127 - oled.getStrWidth(p);
     if (unreadCount) px -= oled.getStrWidth(u) + 4;
     oled.drawStr(px, 63, p);
@@ -1349,22 +1390,25 @@ static void drawMsg() {
 
 static void drawBattery() {
   char b[32];
+  int  lvl = battLevel();
+  bool chg = battCharging();
+  const char* src = battSource();
 
   oled.setFont(u8g2_font_6x10_tf);
-  oled.drawStr(0, 9, "BATERAI HP");
-  oled.drawStr(127 - oled.getStrWidth("iPhone"), 9, "iPhone");
+  oled.drawStr(0, 9, "BATERAI");
+  oled.drawStr(127 - oled.getStrWidth(src), 9, src);
 
-  if (phoneBatt < 0) {
+  if (lvl < 0) {
     oled.setFont(u8g2_font_helvB14_tf);
     oled.drawStr(0, 42, "-");
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(20, 42, "belum ada data");
     oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(0, 62, "kirim lewat Shortcuts / /battery");
+    oled.drawStr(0, 62, "pasang pembagi / kirim B<level>");
     return;
   }
 
-  snprintf(b, sizeof(b), "%d", (int)phoneBatt);
+  snprintf(b, sizeof(b), "%d", lvl);
   oled.setFont(u8g2_font_logisoso26_tn);
   int w = oled.getStrWidth(b);
   oled.drawStr(0, 40, b);
@@ -1375,9 +1419,9 @@ static void drawBattery() {
   const int bx = 90, by = 26, bw = 28, bh = 14;
   oled.drawFrame(bx, by, bw, bh);
   oled.drawBox(bx + bw + 1, by + 4, 3, 6);
-  int fill = (bw - 4) * (int)phoneBatt / 100;
+  int fill = (bw - 4) * lvl / 100;
   if (fill > 0) oled.drawBox(bx + 2, by + 2, fill, bh - 4);
-  if (phoneCharging) {
+  if (chg) {
     // kilat kecil di atas ikon
     oled.drawLine(bx + 16, by - 4, bx + 12, by + 1);
     oled.drawLine(bx + 12, by + 1, bx + 16, by + 1);
@@ -1385,17 +1429,19 @@ static void drawBattery() {
   }
 
   oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 53, phoneCharging ? "mengisi" : "tidak mengisi");
-  if (phoneBattAt == 0)
+  oled.drawStr(0, 53, chg ? "mengisi" : "tidak mengisi");
+  uint32_t stamp = hwBatt >= 0 ? hwBattAt : phoneBattAt;
+  if (stamp == 0)
     snprintf(b, sizeof(b), "tersimpan");
   else {
-    uint32_t age = (millis() - phoneBattAt) / 1000;
+    uint32_t age = (millis() - stamp) / 1000;
     if (age < 60)        snprintf(b, sizeof(b), "baru");
     else if (age < 3600) snprintf(b, sizeof(b), "%lum lalu", (unsigned long)(age / 60));
     else                 snprintf(b, sizeof(b), "%luh lalu", (unsigned long)(age / 3600));
   }
   oled.drawStr(127 - oled.getStrWidth(b), 53, b);
-  oled.drawStr(0, 63, "dari iPhone (WiFi / kabel)");
+  snprintf(b, sizeof(b), "dari %s (ADC / WiFi)", src);
+  oled.drawStr(0, 63, b);
 }
 
 static void drawSys() {
@@ -2749,9 +2795,11 @@ static void setupWeb() {
     doc["last_fed"] = lastFed;
     doc["unread"]   = unreadCount;
     doc["messages"] = inboxCount;
-    doc["battery_level"]    = (int)phoneBatt;
-    doc["battery_charging"] = phoneCharging;
-    doc["battery_age_s"]    = phoneBattAt ? (millis() - phoneBattAt) / 1000 : 0;
+    doc["battery_level"]    = battLevel();
+    doc["battery_charging"] = battCharging();
+    doc["battery_source"]   = battSource();
+    doc["battery_age_s"]    = (hwBatt >= 0 ? hwBattAt : phoneBattAt) ?
+                                (millis() - (hwBatt >= 0 ? hwBattAt : phoneBattAt)) / 1000 : 0;
 
     doc["nav"]      = navActive() ? navText(nav.kind) : "";
     doc["nav_dist"] = navActive() ? nav.dist : 0;
@@ -2845,6 +2893,13 @@ void setup() {
     pinMode(PIN_BTN, BTN_ACTIVE == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
     attachInterrupt(digitalPinToInterrupt(PIN_BTN), btnIsr, CHANGE);
   }
+#if HAS_BAT_ADC
+  analogReadResolution(12);
+  pinMode(PIN_BAT_ADC, INPUT);
+#endif
+#if HAS_CHRG_PIN
+  pinMode(PIN_CHRG, INPUT_PULLUP);   // CHRG TP4056 open-drain aktif LOW
+#endif
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
   oled.setI2CAddress(OLED_ADDR << 1);
@@ -2928,6 +2983,7 @@ void loop() {
 
   pumpGps();
   navTask();
+  updateHardwareBattery();
   updateButton();
   updateSerialInput();
   wifiTask();
