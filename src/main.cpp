@@ -179,6 +179,12 @@ static double   navDestLat = NAN, navDestLon = NAN;
 
 static bool     apOk    = false;   // hasil WiFi.softAP()
 static uint32_t frameMs = 0;       // lama kirim 1 frame ke OLED
+static uint16_t frameBytes = 0;    // byte yang benar-benar dikirim ke OLED
+
+// Snapshot isi OLED terakhir yang sudah dikirim. Dipakai supaya render hanya
+// mengirim baris/tile yang berubah (diam = 0 byte, bukan 1024 byte tiap frame).
+static uint8_t  oledSentBuf[MOOD_FRAME_BYTES];
+static bool     oledSentValid = false;
 
 // Baterai iPhone, dikirim Shortcuts lewat HTTP (atau lewat kabel: B<level>|<0/1>).
 static int8_t   phoneBatt     = -1;   // -1 = belum pernah ada data
@@ -971,6 +977,13 @@ static void blendFromPrev(uint32_t now) {
   int progress = 255 - (int)(remain * 255UL / FACE_BLEND_MS);
   if (progress < 0) progress = 0;
   if (progress > 255) progress = 255;
+  uint8_t* bufFast = oled.getBufferPtr();
+  if (!bufFast) return;
+  if (progress >= 255) return;                     // pakai frame baru semua
+  if (progress <= 0) {                             // pakai frame lama semua
+    memcpy(bufFast, facePrevBuf, MOOD_FRAME_BYTES);
+    return;
+  }
 
   static const uint8_t kBayer[16] = {
      0, 8, 2,10, 12, 4,14, 6, 3,11, 1, 9, 15, 7,13, 5
@@ -1510,17 +1523,59 @@ static void drawMoodPicker() {
   oled.setDrawColor(1);
 }
 
+// Kirim frame ke OLED. Framebuffer u8g2 full-buffer 128x64 = 16 tile per baris
+// (8 px/tile) x 8 baris. Kita bandingkan dengan isi yang terakhir dikirim dan
+// hanya update tile yang berubah. Ini jauh lebih murah daripada sendBuffer()
+// 1024 byte tiap frame, terutama di layar jam/cuaca/notif yang hampir statis.
+static void sendOledSmart() {
+  uint8_t* buf = oled.getBufferPtr();
+  if (!buf) {
+    oled.sendBuffer();
+    frameBytes = MOOD_FRAME_BYTES;
+    return;
+  }
+
+  if (!oledSentValid) {
+    oled.sendBuffer();
+    memcpy(oledSentBuf, buf, MOOD_FRAME_BYTES);
+    oledSentValid = true;
+    frameBytes = MOOD_FRAME_BYTES;
+    return;
+  }
+
+  uint16_t bytes = 0;
+  for (uint8_t ty = 0; ty < 8; ++ty) {
+    const uint8_t* cur = buf + (uint16_t)ty * 16;
+    const uint8_t* old = oledSentBuf + (uint16_t)ty * 16;
+    uint8_t tx0 = 16, tx1 = 0;
+    for (uint8_t tx = 0; tx < 16; ++tx) {
+      if (cur[tx] != old[tx]) {
+        if (tx < tx0) tx0 = tx;
+        tx1 = tx;
+      }
+    }
+    if (tx0 > tx1) continue;                  // baris ini tidak berubah
+    uint8_t tw = (uint8_t)(tx1 - tx0 + 1);
+    oled.updateDisplayArea(tx0, ty, tw, 1);
+    bytes += (uint16_t)tw * 8;
+  }
+
+  frameBytes = bytes;
+  if (bytes == 0) return;                    // layar identik, I2C tidak disentuh
+  memcpy(oledSentBuf, buf, MOOD_FRAME_BYTES);
+}
+
 static void render() {
   uint32_t now = millis();
 
-  // Simpan isi buffer terakhir SEBELUM clear, dipakai crossfade wajah.
-  uint8_t* buf = oled.getBufferPtr();
-  if (buf) memcpy(facePrevBuf, buf, MOOD_FRAME_BYTES);
-
   uint8_t mode = (screen == SCR_FACE || screen == SCR_EAT) ? faceModeNow() : 255;
   static uint8_t prevMode = 255;
-  if (mode != 255 && prevMode != 255 && mode != prevMode)
+  if (mode != 255 && prevMode != 255 && mode != prevMode) {
+    // Ambil snapshot buffer SEBELUM clear, hanya saat transisi wajah.
+    uint8_t* prev = oled.getBufferPtr();
+    if (prev) memcpy(facePrevBuf, prev, MOOD_FRAME_BYTES);
     faceBlendUntil = now + FACE_BLEND_MS;
+  }
   prevMode = mode;
 
   oled.clearBuffer();
@@ -1539,7 +1594,7 @@ static void render() {
   }
   if (mode != 255) blendFromPrev(now);
   uint32_t t0 = micros();
-  oled.sendBuffer();
+  sendOledSmart();
   frameMs = (micros() - t0) / 1000;
 }
 
@@ -2901,10 +2956,10 @@ void setup() {
   pinMode(PIN_CHRG, INPUT_PULLUP);   // CHRG TP4056 open-drain aktif LOW
 #endif
   Wire.begin(PIN_SDA, PIN_SCL);
-  Wire.setClock(400000);
+  Wire.setClock(OLED_I2C_HZ);
   oled.setI2CAddress(OLED_ADDR << 1);
   oled.begin();
-  oled.setBusClock(400000);
+  oled.setBusClock(OLED_I2C_HZ);
   oled.setContrast(180);
 
   // Splash restart: animasi idle happy.gif (set ke-5). Full contrast.
@@ -3022,10 +3077,10 @@ void loop() {
     static uint32_t lastStat = 0;
     if (millis() - lastStat > 5000) {
       lastStat = millis();
-      Serial.printf("[stat] ap=%d ch%d klien=%d heap=%u frame=%lums layar=%s\n",
+      Serial.printf("[stat] ap=%d ch%d klien=%d heap=%u frame=%lums byte=%u layar=%s\n",
                     (int)apOk, WiFi.channel(), WiFi.softAPgetStationNum(),
                     (unsigned)ESP.getFreeHeap(), (unsigned long)frameMs,
-                    SCREEN_NAME[screen]);
+                    (unsigned)frameBytes, SCREEN_NAME[screen]);
     }
   }
 

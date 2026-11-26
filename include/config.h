@@ -86,6 +86,11 @@
 #define GPS_BAUD   9600 // NEO-6M/ATGM336H = 9600, u-blox M10 = 38400
 #define OLED_ADDR  0x3C // kalau blank coba 0x3D
 
+// Kecepatan bus I2C OLED. 800 kHz memotong waktu kirim 1 frame dari ~30 ms
+// jadi ~15 ms (animasi jauh lebih halus). Kalau OLED berkedip/noise,
+// turunkan ke 400000.
+#define OLED_I2C_HZ 800000
+
 // ---------------- Fitur opsional ----------------
 #define HAS_BUTTON 1      // 1 kalau sensor sentuh / tombol sudah dipasang
 #define AUTO_ROTATE_MS 0      // 0 = mati (disarankan saat pakai sensor sentuh)
