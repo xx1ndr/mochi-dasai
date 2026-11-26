@@ -13,7 +13,6 @@
 // library yang dipakai main.cpp (pencarian library hanya membaca .ino).
 #include <Wire.h>
 #include <U8g2lib.h>
-#include <TinyGPSPlus.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>

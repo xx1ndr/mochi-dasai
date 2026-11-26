@@ -2,7 +2,7 @@
 
 Gadget meja kecil: **mochi dasai interaktif** di ESP32-C3 Super Mini dengan OLED
 0.96" (SSD1306 128x64, I2C). Bisa elus, marah, sedih, ngantuk, lapar, kasih
-makan, plus jam, cuaca, GPS, dan notifikasi WhatsApp & Telegram.
+makan, plus jam, cuaca, navigasi/lokasi, dan notifikasi WhatsApp & Telegram.
 
 ```
 +----------------------------+
@@ -11,7 +11,7 @@ makan, plus jam, cuaca, GPS, dan notifikasi WhatsApp & Telegram.
 | 14:05        27 C          |
 |              Cerah berawan |
 |                            |
-| wifi sat08 mq       MSG2   |
+| wifi j:hp mq       MSG2    |
 +----------------------------+
 ```
 
@@ -19,7 +19,7 @@ Sensor sentuh **TTP223** dipasang di GPIO3:
 - **Sentuh pendek** di wajah = elus. Mocha senang memberi hati; kalau marah,
   elus 3 kali membuatnya sedih; sedih/ngantuk langsung senang; kalau lapar,
   sekali sentuh langsung diberi makan.
-- **Tahan ±0,7 detik** (dari layar mana pun) = menu: Jam, Cuaca, **GPS/Peta**,
+- **Tahan ±0,7 detik** (dari layar mana pun) = menu: Jam, Cuaca, **Navigasi**,
   Notif, Ubah mood, Kasih makan, Tutup. Di menu, sentuh = pindah item, tahan = pilih.
   Di pemilih mood ada pilihan **Batal (ke menu)** supaya selalu bisa kembali.
 - Mood dan waktu terakhir makan **tersimpan di NVS**, tetap ingat setelah reboot.
@@ -29,7 +29,7 @@ Semua kontrol juga bisa dari HP lewat halaman web — lihat bagian 4. Untuk tes
 tanpa sensor, buka Serial Monitor dan ketik `s` (= sentuh pendek) atau `l`
 (= tahan); reaksi mood/menu sama persis seperti sensor sentuh.
 
-Layar utama: Wajah mochi -> Jam+cuaca -> GPS -> Cuaca -> Pesan (WA/TG) -> Sistem.
+Layar utama: Wajah mochi -> Jam+cuaca -> Navigasi/Lokasi -> Cuaca -> Pesan (WA/TG) -> Sistem.
 Layar tambahan: Menu, Ubah mood, dan Makan (muncul lewat sentuhan).
 
 ---
@@ -40,14 +40,15 @@ Layar tambahan: Menu, Ubah mood, dan Makan (muncul lewat sentuhan).
 |---|---|
 | ESP32-C3 Super Mini | 4 MB flash, tanpa PSRAM. Cukup. |
 | OLED 0.96" SSD1306 | 128x64, I2C, alamat 0x3C |
-| GPS module | NEO-6M / ATGM336H / u-blox MAX-M10S (UART) |
 | Sensor sentuh | TTP223 (OUT aktif HIGH) ke GPIO3 — layar tetap bisa dikontrol dari web |
-| Kabel | 8-10 jumper female-female |
+| Baterai + modul cas | Li-ion 1 sel + TP4056 (wiring di bagian 2) |
+| Kabel | jumper female-female secukupnya, sambung langsung (tanpa breadboard) |
 
 Catatan:
 - Kode ini untuk OLED **128x64**. Kalau kamu punya yang 0.42" (72x40), bilang saja,
   layout-nya harus diubah.
-- GPS butuh pandangan langit. Di dalam ruangan biasanya **tidak dapat fix**.
+- Tidak ada modul GPS fisik. Lokasi berasal dari HP/browser lewat
+  `/location?src=hp`, lalu geolokasi IP, lalu `HOME_LAT`/`HOME_LON` di `config.h`.
 
 ---
 
@@ -59,40 +60,50 @@ Catatan:
 | OLED | GND | GND |
 | OLED | SDA | GPIO20 |
 | OLED | SCK / SCL | GPIO21 |
-| GPS | VCC | 5V (modul NEO-6M punya regulator) atau 3V3 |
-| GPS | GND | GND |
-| GPS | TX | GPIO4 (RX ESP32) |
-| GPS | RX | GPIO5 (TX ESP32, opsional) |
 | TTP223 | OUT | GPIO3 |
 | TTP223 | VCC | 3V3 |
 | TTP223 | GND | GND |
+| TP4056 | OUT+ | lewat sakelar ON/OFF → 5V (VIN) ESP32 |
+| TP4056 | OUT- | GND |
 
 Kalau pin bentrok dengan kebutuhanmu, ubah di `include/config.h`.
-Di ESP32-C3 pin I2C/UART bebas dipilih, jadi susunan ini cuma kesepakatan:
-OLED di GPIO20/21, GPS di GPIO4/5.
+Di ESP32-C3 pin I2C bebas dipilih, jadi susunan ini cuma kesepakatan:
+OLED di GPIO20/21, TTP223 OUT di GPIO3, ADC baterai di GPIO1, CHRG di GPIO2.
 
-> GPS NEO-6M menarik ~50 mA saat mencari satelit. Dari USB aman.
-> Kalau pakai baterai LiPo 3.7V, jangan langsung ke pin 5V/3V3 — pakai boost/regulator.
+> Tidak ada modul GPS dan tidak ada boost 5V. Baterai Li-ion 3,7–4,2 V masuk
+> langsung ke pin 5V ESP32 lewat sakelar. Saat tegangan turun di bawah ~3,3 V,
+> ESP32 bisa reset — itu wajar untuk Li-ion tanpa boost. **Matikan sakelar
+> baterai saat upload via USB-C ke ESP32**, dan jangan menyalakan sakelar
+> baterai bersamaan dengan USB-C yang dipakai upload: pakai salah satu sumber
+> daya untuk ESP32.
 
 ### OLED 1.3 inch + baterai + modul cas + sakelar ON/OFF
 
-Diagram kabel lengkap (PDF + PNG) ada di [`docs/wiring_mochi.pdf`](docs/wiring_mochi.pdf)
-dan [`docs/wiring_mochi.png`](docs/wiring_mochi.png).
+Diagram kabel (PDF + PNG) ada di [`docs/wiring_mochi.pdf`](docs/wiring_mochi.pdf)
+dan [`docs/wiring_mochi.png`](docs/wiring_mochi.png) — untuk wiring terbaru,
+**ikuti ringkasan di bawah ini**.
 
 Ringkasan:
 
 | Bagian | Koneksi |
 |---|---|
 | OLED 1.3" SH1106 | VCC→3V3, GND→GND, SDA→GPIO20, SCL→GPIO21. `OLED_SH1106 1` di `config.h`. |
-| TP4056 | USB 5V→IN+/-, baterai→B+/B-, OUT+/-→boost. |
-| Baterai Li-ion 1 sel | B+ / B- TP4056. Jangan langsung ke ESP32. |
-| Boost MT3608 | Set dulu ke **5.0 V**, IN dari OUT TP4056. |
-| Sakelar ON/OFF | SPST seri di jalur 5V boost → ESP32 5V/VIN. |
+| TP4056 | USB 5V→IN+/-, baterai→B+/B-, OUT+→sakelar→ESP32 5V, OUT-→GND. |
+| Baterai Li-ion 1 sel | B+ / B- TP4056. **Tanpa boost 5V**, langsung ke ESP32 lewat sakelar. |
+| Sakelar ON/OFF | SPST seri di jalur OUT+ TP4056 → ESP32 5V/VIN. |
 | ADC baterai | B+ → 100k → GPIO1 → 100k → GND (rasio 2:1, aman untuk ADC 3.3V). |
 | CHRG TP4056 | CHRG → GPIO2 (aktif LOW saat mengisi; tambah pull-up 10k ke 3V3 bila perlu). |
 
 Baterai hardware ditampilkan di layar **BATERAI** dan `/api/status` (prioritas
-di atas baterai iPhone). GPS TX ke GPIO5 boleh tidak dipasang.
+di atas baterai iPhone). ADC baterai di GPIO1 (pembagi 100k/100k dari B+),
+status pengisian CHRG di GPIO2.
+
+Catatan baterai:
+- Baterai 3,7–4,2 V masuk langsung ke pin 5V ESP32. Saat tegangan turun, ESP32
+  bisa reset — normal untuk Li-ion tanpa boost.
+- **Matikan sakelar baterai saat upload via USB-C ke ESP32.** Jangan nyalakan
+  sakelar baterai bersamaan dengan USB-C yang dipakai upload; pakai salah satu
+  sumber daya untuk ESP32.
 
 ---
 
@@ -114,7 +125,6 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
    install **esp32 by Espressif Systems** (versi 3.x). Tunggu selesai.
 4. Buka **Library Manager** (ikon buku), install satu per satu:
    - `U8g2` (olikraus)
-   - `TinyGPSPlus` (Mikal Hart)
    - `ArduinoJson` (Benoit Blanchon) — **harus v7**, kalau dapatnya v6 kode error
    - `PubSubClient` (Nick O'Leary)
 5. Set di menu **Tools**:
@@ -172,19 +182,13 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
 
   Di HP: **Setelan → WiFi → mochi-dasai** → buka browser → `192.168.4.1`.
   (iPhone akan bilang "Tidak ada internet" — pilih **Tetap Sambung**, itu normal.)
-- Jam otomatis ikut **jam HP** begitu halaman web dibuka (dikirim lewat
-  `/time?epoch=...`), jadi tetap akurat walau tanpa internet. Zona waktu memakai
-  `configTzTime(TZ_STRING, ...)`, bukan `configTime(0,0,...)` — yang terakhir
-  diam-diam mengubah TZ jadi UTC sehingga jam tampil 7 jam lebih awal (dulu
-  terjadi setelah tombol **Refresh** / sinkron ulang tiap jam).
-- **Cuaca & navigasi mengikuti lokasi.** Urutan prioritas: lokasi HP (GPS HP lewat
-  web) → GPS modul (kalau ada fix) → lokasi dari PC lewat kabel serial →
-  geolokasi IP → `HOME_LAT`/`HOME_LON` di `config.h`. Bisa juga isi koordinat
-  manual di halaman web (**lokasi HP / GPS** → *Simpan lokasi*). Lokasi ini
-  tersimpan di NVS dan dipakai juga oleh peta di `/maps`. Cek lewat
-  `/location?reset=1` kalau mau kembali ke koordinat default.
+- **Cuaca & navigasi mengikuti lokasi.** Urutan prioritas: lokasi HP/browser lewat
+  `/location?src=hp` → geolokasi IP → `HOME_LAT`/`HOME_LON` di `config.h`. Bisa
+  juga isi koordinat manual di halaman web (**lokasi HP** → *Simpan lokasi*).
+  Lokasi ini tersimpan di NVS dan dipakai juga oleh **peta lokasi HP** di `/maps`.
+  Cek lewat `/location?reset=1` kalau mau kembali ke koordinat default.
 
-  > **GPS HP butuh HTTPS.** Browser hanya mengizinkan `navigator.geolocation`
+  > **Lokasi HP butuh HTTPS.** Browser hanya mengizinkan `navigator.geolocation`
   > di origin aman (`https://` atau `localhost`). Kalau halaman dibuka lewat
   > `http://192.168.x.x`, tombol *Mulai lokasi HP* otomatis jatuh ke lokasi IP.
   > Jalankan `bridge\lokasi_hp.bat` (cloudflared sudah terpasang), lalu buka URL
@@ -193,13 +197,36 @@ atau **PlatformIO**. Kode dan config-nya sama, cuma beda cara buka.
   > bergeser ≥5 m (maksimal 1 kali per 5 detik). Pengiriman ini tidak memicu
   > fetch cuaca: cuaca hanya diambil ulang kalau posisi berubah jauh, paling
   > cepat tiap 5 menit — jadi web, OLED, dan navigasi tetap responsif.
-
-  > Tanpa internet, cuaca & Telegram tidak jalan. `AP_ONLY` sudah `0`, jadi ESP32
-  > jadi hotspot **dan** ikut WiFi rumah sekaligus. Isi `WIFI_SSID`/`WIFI_PASS`
-  > di `include/config_local.h` dengan WiFi 2.4 GHz yang dipakai PC bridge.
 - `http://192.168.4.1/api/status` -> JSON status (layar aktif, `time`, `tz`,
-  `wx_lat`/`wx_lon`, gps, cuaca, heap, dll) — cocok untuk cek jam & lokasi.
+  `clock_src` (`ntp|hp|pc|-`), `wx_lat`/`wx_lon`, `gps`, cuaca, heap, dll) —
+  cocok untuk cek jam & lokasi. Field `gps` tetap ada untuk kompatibilitas,
+  tapi isinya lokasi HP/web/IP (`src`, `lat`, `lon`, `fix`), bukan satelit.
 - Bisa juga `http://mochi-01.local/` kalau mDNS jalan di jaringanmu.
+
+### Jam tanpa WiFi rumah
+
+ESP32 **selalu** menyalakan hotspot `mochi-dasai` (`192.168.4.1`), jadi HP bisa
+terhubung tanpa WiFi rumah/internet. Begitu halaman web dibuka di HP, browser
+otomatis mengirim jam lokalnya lewat `/time?epoch=...`. Jam dikirim ulang **tiap
+1 menit**, **saat halaman dibuka lagi**, dan **saat browser kembali online**.
+Jadi tidak perlu internet maupun kabel. Tombol **Set jam dari HP sekarang** di
+halaman web bisa dipakai kalau ingin menyetel langsung.
+
+Sumber jam ditampilkan di status OLED sebagai `j:hp` (dari HP), `j:ntp` (NTP),
+atau `j:pc` (kabel serial), dan di `/api/status` lewat `clock_src`. Setelah mati
+lampu / RTC reset, jam harus diset ulang dari HP, kabel, atau NTP. Zona waktu
+memakai `configTzTime(TZ_STRING, ...)`, bukan `configTime(0,0,...)` — yang
+terakhir diam-diam mengubah TZ jadi UTC sehingga jam tampil 7 jam lebih awal
+(dulu terjadi setelah tombol **Refresh** / sinkron ulang tiap jam).
+
+### Kenapa cuaca butuh WiFi/internet
+
+Cuaca diambil dari API **Open-Meteo**, jadi ESP32 butuh koneksi internet — WiFi
+rumah atau WiFi lain yang bisa internet. `AP_ONLY` sudah `0`, jadi ESP32 jadi
+hotspot **dan** ikut WiFi sekaligus; isi `WIFI_SSID`/`WIFI_PASS` di
+`include/config_local.h` dengan WiFi 2.4 GHz yang dipakai PC bridge. Tanpa
+internet, data terakhir tetap tampil tetapi **tidak diperbarui**, dan Telegram
+tidak jalan. Jam berbeda: jam bisa dari HP lewat hotspot tanpa internet.
 
 ### Kontrol sensor sentuh & konfigurasi
 
@@ -219,18 +246,20 @@ Kalau sensor belum terpasang, layar tetap bisa dikontrol dari HP:
 |---|---|
 | `/next` | pindah ke layar berikutnya |
 | `/refresh` | ambil ulang cuaca + sinkron jam (NTP, zona waktu tetap WIB) |
+| `/time?epoch=...` | set jam dari HP (epoch detik); dikirim otomatis oleh browser, juga dipakai tombol **Set jam dari HP sekarang** |
 | `/location?lat=-6.2&lon=106.8` | set lokasi manual (tersimpan di NVS) |
-| `/location?lat=-6.2&lon=106.8&src=hp` | set lokasi dari GPS HP (dilaporkan `wx_src: hp`) |
+| `/location?lat=-6.2&lon=106.8&src=hp` | set lokasi dari HP/browser (dilaporkan `wx_src: hp`) |
 | `/location?reset=1` | kembali ke `HOME_LAT`/`HOME_LON` |
 | `/clear` | hapus semua notifikasi di inbox |
 | `/notify?from=..&text=..` | kirim notifikasi |
 | `/goto?lat=&lon=` | mulai navigasi otomatis (turn-by-turn, OSRM) |
 | `/find?q=Monas Jakarta` | cari nama tempat jadi koordinat (Nominatim) |
 | `/goto?stop=1` | hentikan navigasi otomatis |
-| `/nav?kind=left&dist=200&road=..` | kirim perintah belokan manual ke layar GPS |
+| `/api/status` | JSON status: `clock_src` (`ntp|hp|pc|-`), `gps` = lokasi HP/web/IP (`src`, `lat`, `lon`, `fix`), cuaca, rute, dll |
+| `/nav?kind=left&dist=200&road=..` | kirim perintah belokan manual ke layar **Navigasi** |
 | `/face?frame=45` | diagnosa: diamkan animasi DASAI di satu frame |
 | `/face?auto=1` | lanjutkan animasi wajah normal |
-| `/maps` (atau `/map`) | monitor GPS: peta Google Maps live + marker, auto-refresh 3 detik |
+| `/maps` (atau `/map`) | peta lokasi HP: Google Maps + marker lokasi HP/web/IP, auto-refresh 3 detik |
 | `/mochi.gif` | animasi idle `happy.gif` (versi kecil 128x81) |
 | `/mood?set=marah` | ubah mood (`senang`, `sedih`, `marah`, `ngantuk`, `lapar`); `idle` kembali ke animasi `happy.gif` tanpa badge |
 | `/feed` | kasih makan (langsung tampil animasi "Nyam") |
@@ -347,11 +376,10 @@ sedang makan atau memilih mood), jadi pesan tidak perlu dicari dengan tombol.
 Pesan ke nomor sendiri ikut diteruskan secara default, supaya mudah diuji. Set
 `IGNORE_SELF=1` kalau memang ingin diabaikan.
 
-Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi
-ESP32 tidak perlu join WiFi `WiFi rumah` supaya jam/cuaca/notif WA jalan. GPS tetap
-membaca modulnya sendiri (butuh fix satelit, taruh di luar ruangan); kalau tidak
-ada fix, layar GPS menampilkan lokasi yang dikirim PC lewat kabel. Kalau port
-bedanya:
+Jam & cuaca dikirim begitu kabel tersambung lalu diulang tiap 10 menit. Jadi jam
+(`j:pc`) dan notif WA jalan lewat kabel tanpa WiFi rumah. Cuaca tetap butuh
+internet untuk diambil dari Open-Meteo (lihat bagian 4), dan navigasi memakai
+lokasi HP/web/IP — tidak ada modul GPS fisik. Kalau port bedanya:
 
 ```bash
 set ESP_PORT=COM3 && npm start   # Windows CMD
@@ -424,10 +452,9 @@ Catatan:
 | OLED garis-garis acak | cek `/face?frame=45`: kalau tetap rusak, masalah kabel/I2C (turunkan `Wire.setClock` ke `100000`) |
 | Hotspot muncul sebentar lalu hilang | daya USB kurang: pakai kabel pendek/adaptor 5V 1A; firmware sudah memakai TX 8.5 dBm + watchdog AP |
 | Board tidak terdeteksi | kabel USB data (bukan charge-only), tahan BOOT saat upload |
-| GPS `NO FIX` | antena menghadap langit, di luar ruangan, TX GPS -> GPIO4, baud 9600 |
-| GPS dapat data tapi koordinat 0 | tunggu 1-3 menit pertama (cold start) |
-| Jam `--:--` | buka `http://192.168.4.1` di HP sekali (jam dikirim dari browser) |
-| Cuaca kosong | butuh internet; set `AP_ONLY 0` + isi WiFi router |
+| Jam `--:--` | buka `http://192.168.4.1` di HP yang tersambung hotspot `mochi-dasai`, atau tekan **Set jam dari HP sekarang**; cek `clock_src` di `/api/status` |
+| Cuaca kosong | butuh internet untuk Open-Meteo: set `AP_ONLY 0` + isi WiFi router yang bisa internet |
+| Lokasi kosong | kirim lokasi HP lewat `/location?src=hp` (butuh HTTPS), biarkan pakai geolokasi IP, atau isi manual `/location?lat=...&lon=...` |
 | Telegram tidak masuk | token salah/kedaluwarsa, bot belum di-`/start`, cek Serial `[tg]` |
 | ESP restart sendiri | catu daya lemah atau brownout; pakai kabel USB pendek |
 | Layar patah-patah | normal; refresh 10 fps, fetching cuaca sesekali memblokir ~1-2 s |
@@ -440,7 +467,8 @@ Catatan:
 
 - C3 single core, tanpa PSRAM: animasi wajah ±15 fps (delay 60/70 ms dari GIF), layar lain 10 fps supaya bus I2C tidak penuh.
 - Cuaca: Open-Meteo (gratis, tanpa API key), update tiap 10 menit.
-- GPS: kecepatan, satelit, HDOP, altitude, jarak tempuh (trip).
+- Navigasi: rute OSRM + panah kompas, memakai lokasi HP/web/IP (tanpa modul GPS).
+- Jam: setelah mati lampu / RTC reset, set ulang dari HP, kabel, atau NTP.
 - Ide: tampilkan pesan penuh dengan scroll, grafik suhu, jam alarm, casing 3D print,
   tombol fisik supaya tidak perlu buka HP untuk pindah layar.
 
@@ -484,12 +512,11 @@ endpoint `/mochi.gif`.
 
 Cukup masukkan tujuan, ESP32 yang menentukan belokannya:
 
-1. Modul GPS **tidak wajib**. Posisi diambil berurutan dari: lokasi HP yang
-   dikirim halaman web (`/location?src=hp`) → modul GPS → geolokasi IP → titik
-   default `HOME_LAT/HOME_LON`. Buka halaman web di HP lewat tunnel HTTPS
-   (`lokasi_hp.bat`) dan biarkan **Ikuti lokasi HP otomatis** aktif; posisi HP
-   dikirim otomatis lewat `watchPosition()` setiap bergeser ≥5 m (maks. 1× per
-   5 detik).
+1. Posisi diambil berurutan dari: lokasi HP/browser lewat `/location?src=hp` →
+   geolokasi IP → titik default `HOME_LAT/HOME_LON`. Buka halaman web di HP
+   lewat tunnel HTTPS (`lokasi_hp.bat`) dan biarkan **Ikuti lokasi HP otomatis**
+   aktif; posisi HP dikirim otomatis lewat `watchPosition()` setiap bergeser
+   ≥5 m (maks. 1× per 5 detik).
 2. Buka halaman web → **navigasi otomatis**.
 3. Ketik nama tempat di **Cari tempat** (misal `Monas Jakarta`) → klik **Cari**;
    koordinat tujuan otomatis terisi. Boleh juga isi `latitude`/`longitude`
@@ -505,7 +532,7 @@ Rute diambil dari **OSRM** (`router.project-osrm.org`) dan geocoding dari
 **Nominatim** — keduanya gratis tanpa API key. Kalau server rute tidak bisa
 diajak bicara (WiFi belum join `WiFi rumah`, internet mati, atau OSRM sibuk), firmware
 otomatis memakai **panah kompas langsung ke tujuan** (8 arah + jarak + derajat),
-jadi navigasi tetap bisa dipakai. Tombol **Panah kompas (tanpa rute/GPS)**
+jadi navigasi tetap bisa dipakai. Tombol **Panah kompas (tanpa rute)**
 memaksa mode ini. Akurasi geocoding IP setingkat kota.
 
 Kalau pencarian gagal, pesan di halaman web sekarang menyebut alasan aslinya
@@ -518,7 +545,7 @@ Endpoint:
 
 ```
 /goto?lat=-6.1754&lon=106.8272     mulai rute otomatis (OSRM)
-/goto?nogeo=1&lat=-6.1754&lon=106.8272  panah kompas tanpa OSRM / tanpa GPS
+/goto?nogeo=1&lat=-6.1754&lon=106.8272  panah kompas tanpa OSRM
 /find?q=Monas%20Jakarta            cari tempat -> lat/lon
 /goto?stop=1                       hentikan rute
 ```

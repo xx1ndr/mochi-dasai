@@ -1,7 +1,7 @@
 /*
- *  mochi dasai — jam, cuaca, GPS, notifikasi WhatsApp & Telegram
- *  Target : ESP32-C3 Super Mini   + OLED SSD1306 128x64 (I2C)
- *  GPS    : NEO-6M / ATGM336H / MAX-M10S
+ *  mochi dasai — jam, cuaca, notifikasi WhatsApp & Telegram
+ *  Target : ESP32-C3 Super Mini   + OLED SH1106/SSD1306 128x64 (I2C)
+ *  Lokasi: dari HP/browser (tanpa modul GPS)
  *
  *  Layar  : tombol pendek = ganti layar, tombol lama = refresh / hapus notif
  *           tanpa tombol: http://<ip>/next  /clear  /refresh  (ada tombolnya di web)
@@ -12,7 +12,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
-#include <TinyGPSPlus.h>
 #include <WiFi.h>
 #include <esp_wifi.h>          // esp_wifi_set_max_tx_power / esp_wifi_set_ps
 #include <WiFiClientSecure.h>
@@ -42,8 +41,6 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_SCL, PIN_SDA
 #else
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_SCL, PIN_SDA);
 #endif
-TinyGPSPlus    gps;
-HardwareSerial gpsSerial(1);
 WebServer      web(80);
 WiFiClient     mqttNet;
 PubSubClient   mqtt(mqttNet);
@@ -54,13 +51,13 @@ static const char* MON_ID[] = {"Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
                                "Jul", "Agu", "Sep", "Okt", "Nov", "Des"};
 
 enum Screen : uint8_t {
-  SCR_FACE, SCR_HOME, SCR_GPS, SCR_WX, SCR_MSG, SCR_SYS, SCR_BATT,
+  SCR_FACE, SCR_HOME, SCR_NAV, SCR_WX, SCR_MSG, SCR_SYS, SCR_BATT,
   SCR_MENU, SCR_MOOD, SCR_EAT, SCR_COUNT
 };
 static Screen screen = SCR_FACE;
 
 static const char* SCREEN_NAME[] = {
-  "wajah", "jam", "gps", "cuaca", "notif", "sistem", "baterai",
+  "wajah", "jam", "navigasi", "cuaca", "notif", "sistem", "baterai",
   "menu", "ubah mood", "makan"
 };
 
@@ -118,10 +115,10 @@ static Weather wx = {false, NAN, NAN, NAN, NAN, -1, 0};
 static bool     wxFromSerial = false;   // data cuaca dikirim PC lewat kabel USB
 
 // Lokasi untuk cuaca. Urutan prioritas:
-//   GPS -> lokasi dari web/HP (NVS) -> geolokasi IP publik -> HOME.
+//   lokasi dari web/HP (NVS) -> geolokasi IP publik -> HOME.
 static float    wxLat = HOME_LAT, wxLon = HOME_LON;
 static bool     wxLocSet = false;
-static bool     wxLocPhone = false;   // koordinat berasal dari GPS HP lewat web
+static bool     wxLocPhone = false;   // koordinat berasal dari lokasi HP lewat web
 
 // Lokasi otomatis dari IP publik ESP32 (tidak disimpan di NVS, refresh 30 mnt).
 static float    wxIpLat = NAN, wxIpLon = NAN;
@@ -130,23 +127,18 @@ static uint32_t wxIpAge = 0;
 static const char* wxSource() {
   if (wxLocSet && wxLocPhone) return "hp";   // HP dikirim lewat web/geolocation
   if (wxFromSerial) return "serial";
-  if (gps.location.isValid() && gps.location.age() < 5000) return "gps";
   if (wxLocSet) return "web";
   if (!isnan(wxIpLat)) return "ip";
   return "default";
 }
 
-static uint32_t gpsChars = 0;
-static double   tripKm = 0;
-static double   lastLat = 0, lastLon = 0;
-static bool     haveLastPos = false;
 static bool     forceWeather = false;
 
 // ---- perintah belokan (/nav manual) + rute otomatis (/goto, OSRM tanpa API key)
 enum NavKind : uint8_t {
   NAV_STRAIGHT, NAV_LEFT, NAV_RIGHT, NAV_SLIGHT_LEFT,
   NAV_SLIGHT_RIGHT, NAV_UTURN, NAV_ROUNDABOUT, NAV_ARRIVE,
-  // Panah kompas ke tujuan (mode tanpa OSRM / tanpa GPS).
+  // Panah kompas ke tujuan (mode tanpa OSRM).
   NAV_N, NAV_NE, NAV_E, NAV_SE, NAV_S, NAV_SW, NAV_W, NAV_NW
 };
 
@@ -160,7 +152,7 @@ struct NavStep {
 static NavStep nav = {false, NAV_STRAIGHT, 0, "", 0};
 static const uint32_t NAV_TTL_MS = 30UL * 60UL * 1000UL;  // 30 menit (dulu 5 menit)
 
-// Rute otomatis: petunjuk diambil dari OSRM, maju mengikuti posisi GPS.
+// Rute otomatis: petunjuk diambil dari OSRM, maju mengikuti posisi HP/web/IP.
 struct RouteStep {
   uint8_t  kind;
   uint32_t atM;       // jarak kumulatif dari titik awal sampai belokan ini
@@ -203,6 +195,21 @@ static bool localNow(struct tm* out) {
   if (now < 1700000000) return false;
   if (out) localtime_r(&now, out);
   return true;
+}
+
+// Sumber jam supaya jelas di OLED: NTP (WiFi rumah), HP (hotspot, tanpa
+// internet), atau PC/kabel USB. ESP32 tidak punya baterai RTC, jadi setelah
+// mati lampu jam harus diset ulang dari salah satu sumber ini.
+enum ClockSrc : uint8_t { CLOCK_NONE = 0, CLOCK_NTP, CLOCK_PHONE, CLOCK_PC };
+static ClockSrc clockSrc = CLOCK_NONE;
+
+static const char* clockSrcName() {
+  switch (clockSrc) {
+    case CLOCK_NTP:   return "ntp";
+    case CLOCK_PHONE: return "hp";
+    case CLOCK_PC:    return "pc";
+    default:          return "-";
+  }
 }
 
 /* buang newline, emoji, dan spasi berlebih supaya aman di OLED */
@@ -305,6 +312,18 @@ static void updateHardwareBattery() {
     delay(2);
   }
   int mv = (int)(sum / BAT_SAMPLES * BAT_DIV_RATIO);
+
+  // Pin ADC yang belum disolder mengambang dan serialnya bisa membaca
+  // 1800-3000 mV secara acak. Tolak bacaan di luar rentang baterai Li-ion
+  // dan lonjakan mendadak supaya OLED tidak berkedip 0%.
+  if (mv < BAT_MIN_MV || mv > BAT_MAX_MV + 200) return;
+  static int lastMv = -1;
+  if (lastMv >= 0) {
+    int diff = mv > lastMv ? mv - lastMv : lastMv - mv;
+    if (diff > 600) return;
+  }
+  lastMv = mv;
+
   int pct = (mv - BAT_MIN_MV) * 100 / (BAT_MAX_MV - BAT_MIN_MV);
   if (pct < 0)   pct = 0;
   if (pct > 100) pct = 100;
@@ -321,8 +340,8 @@ static void updateHardwareBattery() {
 #endif
 }
 
-// Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau GPS tidak fix.
-// fromPhone=true kalau sumbernya GPS HP (browser geolocation lewat /location?src=hp).
+// Koordinat cuaca disimpan supaya tetap dipakai setelah reboot walau HP belum kirim lokasi.
+// fromPhone=true kalau sumbernya lokasi HP (browser geolocation lewat /location?src=hp).
 static void saveWxLocation(float lat, float lon, bool fromPhone = false,
                            bool persist = true) {
   if (persist) {
@@ -419,11 +438,11 @@ static void onFaceTap() {
 }
 
 enum MenuItem : uint8_t {
-  MENU_CLOCK = 0, MENU_WEATHER, MENU_GPS, MENU_NOTIF,
+  MENU_CLOCK = 0, MENU_WEATHER, MENU_NAV, MENU_NOTIF,
   MENU_MOOD, MENU_FEED, MENU_CLOSE, MENU_COUNT
 };
 static const char* MENU_LABEL[] = {
-  "Jam", "Cuaca", "GPS/Peta", "Notif", "Ubah mood", "Kasih makan", "Tutup"
+  "Jam", "Cuaca", "Navigasi", "Notif", "Ubah mood", "Kasih makan", "Tutup"
 };
 
 // Pilihan tambahan di picker mood supaya selalu ada jalan keluar ke menu.
@@ -439,8 +458,8 @@ static void onMenuSelect() {
       forceWeather = true;
       configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org");
       break;
-    case MENU_GPS:
-      screen = SCR_GPS;
+    case MENU_NAV:
+      screen = SCR_NAV;
       break;
     case MENU_NOTIF:
       screen = SCR_MSG;
@@ -533,29 +552,20 @@ static void wifiTask() {
     Serial.println("[wifi] masih gagal -> coba hotspot HP (2.4 GHz) & hapus NVS");
 }
 
-// konversi UTC -> epoch tanpa bergantung pada timegm()
-static time_t utcEpoch(int year, int mon, int day, int hour, int minute, int second) {
-  static const uint8_t mdays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-  int64_t days = 0;
-  for (int y = 1970; y < year; ++y)
-    days += ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 366 : 365;
-  for (int m = 0; m < mon - 1; ++m) {
-    days += mdays[m];
-    if (m == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) days += 1;
-  }
-  days += day - 1;
-  return (time_t)(days * 86400LL + hour * 3600LL + minute * 60LL + second);
-}
-
 static void timeTask() {
   static bool     ntpStarted = false;
   static uint32_t lastSync   = 0;
 
+  if (!localNow(nullptr) && clockSrc != CLOCK_NONE) clockSrc = CLOCK_NONE;
+
+  // Tanpa WiFi rumah tetap ada jam: HP yang connect ke hotspot "mochi-dasai"
+  // mengirim /time?epoch=... otomatis lewat browser. NTP hanya tambahan saat
+  // ESP32 benar-benar online.
   if (WiFi.status() != WL_CONNECTED) { ntpStarted = false; return; }
 
   if (!ntpStarted) {
     // configTzTime penting: configTime(0,0,...) menimpa TZ jadi UTC0, sehingga
-    // jam yang dikirim browser/GPS tampil 7 jam lebih awal (WIB jadi UTC).
+    // jam yang dikirim browser tampil 7 jam lebih awal (WIB jadi UTC).
     configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org", "time.google.com");
     ntpStarted = true;
     lastSync   = millis();
@@ -563,24 +573,13 @@ static void timeTask() {
   }
 
   if (localNow(nullptr)) {
+    // Jam dari HP/PC sengaja dipertahankan labelnya walaupun WiFi menyala.
+    if (clockSrc == CLOCK_NONE || clockSrc == CLOCK_NTP) clockSrc = CLOCK_NTP;
     if (millis() - lastSync > 3600000UL) {   // resync tiap jam
       configTzTime(TZ_STRING, "pool.ntp.org", "id.pool.ntp.org");
       lastSync = millis();
     }
     return;
-  }
-
-  // belum dapat NTP -> ambil jam dari GPS (GPS = UTC)
-  if (gps.date.isValid() && gps.time.isValid() &&
-      gps.time.age() < 2000 && gps.date.age() < 2000) {
-    time_t epoch = utcEpoch(gps.date.year(), gps.date.month(), gps.date.day(),
-                            gps.time.hour(), gps.time.minute(), gps.time.second());
-    if (epoch > 1700000000) {
-      struct timeval tv = { epoch, 0 };
-      settimeofday(&tv, nullptr);
-      tzset();
-      Serial.println("[jam] diset dari GPS");
-    }
   }
 }
 
@@ -640,7 +639,7 @@ static bool fetchWeather(float lat, float lon) {
 
 // Tanya layanan geolokasi IP publik supaya cuaca mengikuti kota tempat ESP32
 // tersambung WiFi. Gratis, tanpa API key, dan jalan di background walaupun HP
-// tidak membuka halaman web. Akurasinya setingkat kota (bukan titik GPS).
+// tidak membuka halaman web. Akurasinya setingkat kota (bukan GPS presisi).
 #if AUTO_IP_GEO
 static void geoIpTask() {
   static uint32_t lastTry = 0;
@@ -687,12 +686,9 @@ static void weatherTask() {
   static uint32_t lastTry = 0;
   static float    usedLat = NAN, usedLon = NAN;
 
-  // GPS > lokasi web/HP > IP publik > default HOME.
+  // Lokasi HP/web > IP publik > default HOME. Tidak ada modul GPS.
   float lat, lon;
-  if (gps.location.isValid() && gps.location.age() < 15000) {
-    lat = (float)gps.location.lat();
-    lon = (float)gps.location.lng();
-  } else if (wxLocSet) {
+  if (wxLocSet) {
     lat = wxLat;
     lon = wxLon;
   } else if (!isnan(wxIpLat)) {
@@ -894,24 +890,9 @@ static void telegramTask() {
   primed = true;
 }
 
-// ------------------------------------------------------------ GPS
-static void pumpGps() {
-  uint16_t budget = 256;
-  while (gpsSerial.available() > 0 && budget--) {
-    gps.encode((char)gpsSerial.read());
-    gpsChars++;
-  }
-
-  if (gps.location.isUpdated()) {
-    if (haveLastPos) {
-      double d = TinyGPSPlus::distanceBetween(lastLat, lastLon,
-                                              gps.location.lat(), gps.location.lng());
-      if (d > 3.0 && d < 500.0) tripKm += d / 1000.0;
-    }
-    lastLat = gps.location.lat();
-    lastLon = gps.location.lng();
-    haveLastPos = true;
-  }
+// Posisi "fix" sekarang berarti ada lokasi dari HP/web atau IP publik.
+static bool havePhonePos() {
+  return wxLocSet || !isnan(wxIpLat);
 }
 
 // ------------------------------------------------------------ gambar
@@ -932,12 +913,15 @@ static void drawTrunc(int x, int y, const char* s, int maxChars) {
 static void drawStatusBar() {
   oled.setFont(u8g2_font_5x7_tf);
   char b[32];
-  int sats = gps.satellites.isValid() ? (int)gps.satellites.value() : 0;
-  snprintf(b, sizeof(b), "%s sat%02d%s",
-           WiFi.status() == WL_CONNECTED ? "wifi" : "ap",
-           sats,
-           mqtt.connected() ? " mq" : "");
-  oled.drawStr(0, 63, b);
+  if (!localNow(nullptr)) {
+    oled.drawStr(0, 63, "HP: 192.168.4.1");
+  } else {
+    snprintf(b, sizeof(b), "%s j:%s%s",
+             WiFi.status() == WL_CONNECTED ? "wifi" : "ap",
+             clockSrcName(),
+             mqtt.connected() ? " mq" : "");
+    oled.drawStr(0, 63, b);
+  }
 
   char u[10] = "";
   if (unreadCount) {
@@ -1140,14 +1124,16 @@ static void drawHome() {
     oled.drawStr(w + 4, 40, b);
   }
 
-  // baris cuaca
+  // baris cuaca; kalau jam belum ada, prioritaskan petunjuk set jam dari HP
   oled.setFont(u8g2_font_6x10_tf);
-  if (wx.valid) {
+  if (!tOK) {
+    oled.drawStr(0, 53, "WiFi: mochi-dasai");
+  } else if (wx.valid) {
     oled.drawStr(0, 53, wxText(wx.code));
     snprintf(b, sizeof(b), "%d%%", (int)roundf(wx.rh));
     oled.drawStr(127 - oled.getStrWidth(b), 53, b);
   } else {
-    oled.drawStr(0, 53, "cuaca: menunggu");
+    oled.drawStr(0, 53, "cuaca: butuh internet");
   }
 
   drawStatusBar();
@@ -1256,9 +1242,9 @@ static bool navActive() {
   return nav.valid && (routeActive || (millis() - nav.at) < NAV_TTL_MS);
 }
 
-static void drawGps() {
-  bool fix = gps.location.isValid() && gps.location.age() < 5000;
+static void drawNav() {
   char b[40];
+  bool pos = havePhonePos();
 
   if (navActive()) {
     // ---- mode navigasi: panah besar + jarak + nama jalan
@@ -1283,50 +1269,29 @@ static void drawGps() {
     oled.setFont(u8g2_font_5x7_tf);
     drawTrunc(48, 54, nav.road, 13);
 
-    snprintf(b, sizeof(b), "%s%.0f km/j", fix ? "" : "-",
-             fix ? gps.speed.kmph() : 0.0f);
+    snprintf(b, sizeof(b), "lokasi: %s", pos ? wxSource() : "-");
     oled.drawStr(48, 63, b);
     return;
   }
 
   oled.setFont(u8g2_font_6x10_tf);
-  oled.drawStr(0, 9, "GPS");
-  const char* st = fix ? "FIX" : "NO FIX";
+  oled.drawStr(0, 9, "LOKASI");
+  const char* st = pos ? wxSource() : "kosong";
   oled.drawStr(127 - oled.getStrWidth(st), 9, st);
 
-  // kecepatan besar
-  snprintf(b, sizeof(b), "%.0f", fix ? gps.speed.kmph() : 0.0f);
-  oled.setFont(u8g2_font_logisoso26_tn);
-  int w = oled.getStrWidth(b);
-  oled.drawStr(0, 40, b);
-  oled.setFont(u8g2_font_6x10_tf);
-  oled.drawStr(w + 5, 40, "km/j");
-
   oled.setFont(u8g2_font_5x7_tf);
-  snprintf(b, sizeof(b), "sat%02d hd%.1f alt%.0fm",
-           gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
-           gps.hdop.isValid() ? gps.hdop.hdop() : 0.0,
-           gps.altitude.isValid() ? gps.altitude.meters() : 0.0);
-  oled.drawStr(0, 50, b);
-
-  snprintf(b, sizeof(b), "%.1fkm", tripKm);
-  oled.drawStr(127 - oled.getStrWidth(b), 50, b);
-
-  if (fix) {
-    snprintf(b, sizeof(b), "lat %9.5f", gps.location.lat());
-    oled.drawStr(0, 57, b);
-    snprintf(b, sizeof(b), "lon %9.5f", gps.location.lng());
-    oled.drawStr(0, 64, b);
-  } else if (wxFromSerial && !isnan(wxLat) && !isnan(wxLon)) {
-    // Tidak ada fix satelit (misal di dalam ruangan): tampilkan lokasi yang
-    // dikirim PC lewat kabel supaya layar GPS tetap informasi.
-    oled.drawStr(0, 57, "lokasi dari PC:");
-    snprintf(b, sizeof(b), "%.5f,%.5f", wxLat, wxLon);
-    oled.drawStr(0, 64, b);
+  if (pos) {
+    snprintf(b, sizeof(b), "%.5f", wxLat);
+    oled.drawStr(0, 30, b);
+    snprintf(b, sizeof(b), "%.5f", wxLon);
+    oled.drawStr(0, 40, b);
+    oled.drawStr(0, 53, "dari HP/web/IP (tanpa GPS)");
   } else {
-    oled.drawStr(0, 57, "cari satelit... taruh di luar ruangan");
-    oled.drawStr(0, 64, "atau kirim rute dari web");
+    oled.drawStr(0, 30, "belum ada lokasi");
+    oled.drawStr(0, 40, "buka webHP, kirim lokasi");
+    oled.drawStr(0, 53, "Lokasi HP / IP / manual");
   }
+  oled.drawStr(0, 63, "rute: /goto?lat=&lon=");
 }
 
 static void drawWx() {
@@ -1481,9 +1446,9 @@ static void drawSys() {
   oled.drawStr(0, y, b); y += 9;
 
   uint32_t s = millis() / 1000;
-  snprintf(b, sizeof(b), "up %luh%02lum  gps %lu B",
+  snprintf(b, sizeof(b), "up %luh%02lum  jam %s",
            (unsigned long)(s / 3600), (unsigned long)((s % 3600) / 60),
-           (unsigned long)gpsChars);
+           clockSrcName());
   oled.drawStr(0, y, b);
 }
 
@@ -1563,7 +1528,7 @@ static void render() {
   switch (screen) {
     case SCR_FACE: drawFace(); break;
     case SCR_HOME: drawHome(); break;
-    case SCR_GPS:  drawGps();  break;
+    case SCR_NAV:  drawNav();  break;
     case SCR_WX:   drawWx();   break;
     case SCR_MSG:  drawMsg();  break;
     case SCR_SYS:  drawSys();  break;
@@ -1756,6 +1721,7 @@ static void handleSerialLine(const char* line) {
       struct timeval tv = { (time_t)epoch, 0 };
       settimeofday(&tv, nullptr);
       tzset();
+      clockSrc = CLOCK_PC;
       Serial.println("[jam] diset dari PC (serial)");
     }
     return;
@@ -1896,6 +1862,13 @@ a{color:#3ddc97}
 <button id=next>Layar berikutnya</button>
 <button class=alt id=refresh>Refresh cuaca + jam</button>
 <button class=alt id=clear>Hapus semua notif</button>
+<h3>jam <span id=jamNow>-</span></h3>
+<p style="font-size:12px;color:#888;margin:0 0 6px">
+  Tanpa WiFi rumah, sambung HP ke hotspot <b>mochi-dasai</b> lalu buka
+  <b>192.168.4.1</b>. Halaman ini otomatis mengirim jam HP tiap menit
+  (tidak perlu internet). Tombol di bawah untuk set sekarang.
+</p>
+<button class=alt onclick="syncClock().then(clockUpd)">Set jam dari HP sekarang</button>
 <h3>mochi <span id=moodNow>-</span></h3>
 <button class=alt onclick="fetch('/mood?set=senang').then(upd)">Senang</button>
 <button class=alt onclick="fetch('/mood?set=sedih').then(upd)">Sedih</button>
@@ -1938,11 +1911,11 @@ a{color:#3ddc97}
   <button>Simpan token</button>
 </form>
 <button class=alt onclick="fetch('/telegram?clear=1').then(r=>r.json()).then(()=>tgUpd())">Hapus token</button>
-<h3>lokasi HP / GPS</h3>
+<h3>lokasi HP / IP</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
-  GPS HP dikirim terus ke ESP32 lewat WiFi (dipakai navigasi &amp; cuaca).
-  Prioritas: GPS modul &rarr; HP &rarr; IP WiFi. <b>Geolocation butuh HTTPS</b>:
-  buka halaman ini lewat tunnel (lihat README), kalau tidak akan jatuh ke IP.
+  Lokasi HP dikirim ke ESP32 lewat WiFi hotspot (dipakai navigasi &amp; cuaca).
+  Modul GPS tidak dipasang. Prioritas: HP &rarr; IP WiFi.
+  <b>Geolocation butuh HTTPS</b> atau localhost; kalau tidak, pakai lokasi IP/manual.
 </p>
 <form onsubmit="event.preventDefault();
   fetch('/location?lat='+encodeURIComponent(la.value)+'&lon='+encodeURIComponent(lo.value))
@@ -1965,9 +1938,8 @@ a{color:#3ddc97}
 <button class=alt onclick="locateNow()">Kirim sekarang</button>
 <h3>navigasi otomatis</h3>
 <p style="font-size:12px;color:#888;margin:0 0 6px">
-  Masukkan tujuan (nama tempat atau koordinat). Posisi boleh dari modul GPS,
-  lokasi HP, atau IP -- GPS tidak wajib. Kalau server rute tidak bisa diakses,
-  otomatis dipakai panah kompas ke tujuan.
+  Masukkan tujuan (nama tempat atau koordinat). Posisi boleh dari lokasi HP
+  atau IP. Kalau server rute tidak bisa diakses, otomatis dipakai panah kompas.
 </p>
 <form onsubmit="event.preventDefault();
   fetch('/find?q='+encodeURIComponent(q.value)).then(r=>r.json()).then(d=>{
@@ -1984,7 +1956,7 @@ a{color:#3ddc97}
   <input id=lo2 type=number step=0.0001 placeholder="longitude tujuan">
   <button>Mulai navigasi</button>
 </form>
-<button class=alt onclick="fetch('/goto?nogeo=1&lat='+encodeURIComponent(la2.value)+'&lon='+encodeURIComponent(lo2.value)).then(r=>r.json()).then(d=>{$('routeErr').textContent=d.msg;navUpd()})">Panah kompas (tanpa rute/GPS)</button>
+<button class=alt onclick="fetch('/goto?nogeo=1&lat='+encodeURIComponent(la2.value)+'&lon='+encodeURIComponent(lo2.value)).then(r=>r.json()).then(d=>{$('routeErr').textContent=d.msg;navUpd()})">Panah kompas (tanpa rute)</button>
 <p id=routeInfo style="font-size:12px">-</p>
 <p id=routeErr style="font-size:12px;color:#3ddc97"></p>
 <button class=alt onclick="fetch('/goto?stop=1').then(r=>r.json()).then(d=>{$('routeErr').textContent=d.msg;navUpd()})">Hentikan navigasi</button>
@@ -2005,7 +1977,7 @@ a{color:#3ddc97}
   <input id=r value="Jl. Sudirman" placeholder="nama jalan">
   <button>Kirim rute</button>
 </form>
-<p><a href="/maps">Peta GPS live (Google Maps)</a> &middot; <a href="/api/status">/api/status</a></p>
+<p><a href="/maps">Peta lokasi live (Google Maps)</a> &middot; <a href="/api/status">/api/status</a></p>
 <script>
 const $=id=>document.getElementById(id);
 function upd(){fetch('/api/status').then(r=>r.json()).then(s=>{$('now').textContent='- '+s.screen;$('moodNow').textContent='- '+s.mood})}
@@ -2019,13 +1991,18 @@ function battUpd(){fetch('/battery').then(r=>r.json()).then(b=>{
 function tgUpd(){fetch('/telegram').then(r=>r.json()).then(t=>{
   $('tgNow').textContent = t.active ? 'aktif' : '-';
 })}
+function clockUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
+  const src=s.clock_src||'-';
+  const label={ntp:'WiFi rumah',hp:'HP (hotspot)',pc:'kabel USB'}[src]||'belum ada';
+  $('jamNow').textContent=(s.time||'-')+' WIB · '+label;
+})}
 function navUpd(){fetch('/api/status').then(r=>r.json()).then(s=>{
   const g=s.gps||{};
   const aktif = s.route_active || !!s.nav;
   $('routeInfo').textContent = aktif
-    ? s.nav+' · sisa '+(s.nav_dist||0)+' m · '+(s.route_active?('total '+(s.route_total||0)+' m · '):'')+(g.fix?'GPS':'lokasi HP/IP')
-    : 'Rute tidak aktif · GPS '+(g.fix?'fix':'cari satelit');
-  // Tanpa modul GPS, posisi HP dikirim ulang supaya jarak/panah terus jalan.
+    ? s.nav+' · sisa '+(s.nav_dist||0)+' m · '+(s.route_active?('total '+(s.route_total||0)+' m · '):'')+(g.fix?('lokasi '+(g.src||'HP')):'tanpa lokasi')
+    : 'Rute tidak aktif · lokasi '+(g.fix?(g.src||'HP'):'belum ada');
+  // Posisi HP dikirim ulang supaya jarak/panah terus jalan.
   if (aktif && $('autoLoc').checked && !g.fix) locateNow();
 })}
 let geoWatch=null, lastSend=0, lastLat=null, lastLon=null;
@@ -2050,7 +2027,7 @@ function kirimLokasi(lat,lon,sumber,dariHp){
   }).catch(()=>geoStatus('Gagal mengirim lokasi ke ESP32','#e57373'));
 }
 function lokasiDariIP(){
-  geoStatus('GPS HP tidak tersedia, pakai lokasi IP...');
+  geoStatus('Lokasi HP tidak tersedia, pakai lokasi IP...');
   fetch('https://ipwho.is/').then(r=>r.json()).then(d=>{
     if(d.success && isFinite(d.latitude) && isFinite(d.longitude))
       kirimLokasi(d.latitude,d.longitude,'IP ('+(d.city||'?')+')',false);
@@ -2063,13 +2040,13 @@ function startWatch(){
   if(!window.isSecureContext){
     geoStatus('Butuh HTTPS! Buka lewat tunnel (lihat README)','#e57373');lokasiDariIP();return
   }
-  geoStatus('Mencari sinyal GPS HP...');
+  geoStatus('Mencari lokasi HP...');
   geoWatch=navigator.geolocation.watchPosition(
     p=>{
       geoStatus('Lokasi HP aktif · akurasi ±'+Math.round(p.coords.accuracy||0)+' m','#3ddc97');
-      kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP',true);
+      kirimLokasi(p.coords.latitude,p.coords.longitude,'Lokasi HP',true);
     },
-    e=>{geoStatus('GPS HP: '+(e.message||'gagal')+' → pakai IP','#e57373');lokasiDariIP()},
+    e=>{geoStatus('Lokasi HP: '+(e.message||'gagal')+' → pakai IP','#e57373');lokasiDariIP()},
     {enableHighAccuracy:true,timeout:10000,maximumAge:3000}
   );
   $('geoBtn').textContent='Hentikan lokasi HP';
@@ -2090,7 +2067,7 @@ function locateNow(){
   startWatch();
   if(Date.now()-lastSend>60000 && navigator.geolocation && window.isSecureContext){
     navigator.geolocation.getCurrentPosition(
-      p=>kirimLokasi(p.coords.latitude,p.coords.longitude,'GPS HP',true),
+      p=>kirimLokasi(p.coords.latitude,p.coords.longitude,'Lokasi HP',true),
       e=>lokasiDariIP(),
       {enableHighAccuracy:false,timeout:8000,maximumAge:5000}
     );
@@ -2104,22 +2081,27 @@ $('next').onclick=()=>fetch('/next').then(upd);
 $('refresh').onclick=()=>fetch('/refresh');
 $('clear').onclick=()=>fetch('/clear').then(upd);
 $('feed').onclick=()=>fetch('/feed').then(upd);
-function syncClock(){fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
+function syncClock(){return fetch('/time?epoch='+Math.floor(Date.now()/1000)).catch(()=>{})}
 syncClock(); setInterval(syncClock, 60000);
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden) syncClock().then(clockUpd);
+});
+window.addEventListener('online',()=>syncClock().then(clockUpd));
 $('autoLoc').checked = localStorage.getItem('mochiAutoLoc') !== '0';
-upd(); locUpd(); navUpd(); battUpd(); tgUpd();
+upd(); locUpd(); navUpd(); battUpd(); tgUpd(); clockUpd();
 if($('autoLoc').checked) startWatch();
 setInterval(locUpd, 30000);
 setInterval(navUpd, 3000);
+setInterval(clockUpd, 10000);
 </script>
 )HTML";
 
-// Halaman monitor GPS: peta Google Maps live tanpa API key.
+// Halaman monitor lokasi: peta Google Maps live tanpa API key.
 // Peta di-render langsung di browser HP (butuh internet di HP), koordinat
-// diambil dari /api/status yang dibaca ESP32 dari modul GPS.
+// diambil dari /api/status (sumber: HP/web/IP, bukan modul GPS).
 static const char MAP_HTML[] PROGMEM = R"HTML(
 <!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
-<title>mochi gps monitor</title>
+<title>mochi lokasi monitor</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#121212;color:#eee;margin:0;padding:14px}
 h3{margin:0 0 8px} h3 span{color:#3ddc97;font-weight:400;font-size:14px}
@@ -2130,8 +2112,8 @@ iframe{width:100%;height:65vh;min-height:340px;border:0;border-radius:10px;backg
 p{font-size:13px} a{color:#3ddc97}
 button{font:inherit;padding:8px 12px;border-radius:8px;border:0;background:#3ddc97;color:#0b0b0b;font-weight:700}
 </style>
-<h3>GPS monitor <span id=stat>-</span></h3>
-<div id=info>Menunggu data GPS...</div>
+<h3>Lokasi HP <span id=stat>-</span></h3>
+<div id=info>Menunggu lokasi dari HP...</div>
 <iframe id=map title="Peta Google Maps" loading="lazy"></iframe>
 <p><a id=open target=_blank rel=noopener>Buka di Google Maps</a> &middot; <a href="/">kontrol</a></p>
 <p><button onclick="location.reload()">Muat ulang</button> &middot; otomatis tiap 3 detik</p>
@@ -2149,14 +2131,11 @@ function upd(){
     const ll = fix ? f(g.lat,6) + ',' + f(g.lon,6)
                    : (lastFixLL || defaultLL || '-6.2088,106.8456');
     if (fix) lastFixLL = ll;
-    $('stat').textContent = '- ' + (fix ? 'GPS fix' : 'cari satelit');
+    $('stat').textContent = '- ' + (fix ? ('lokasi '+(g.src||'HP')) : 'belum ada lokasi');
     $('info').innerHTML =
       'Posisi: <b>' + (fix ? f(g.lat,6) + ', ' + f(g.lon,6) : 'belum tersedia') + '</b><br>' +
-      'Satelit: <b>' + (g.sats||0) + '</b> &middot; HDOP: <b>' + f(g.hdop,1) + '</b> &middot; ' +
-      'umur data: <b>' + (g.age_ms||0) + ' ms</b><br>' +
-      'Kecepatan: <b>' + f(g.speed_kmh,1) + ' km/j</b> &middot; arah: <b>' + f(g.course,0) + '&deg;</b> &middot; ' +
-      'altitude: <b>' + f(g.alt_m,0) + ' m</b><br>' +
-      'Perjalanan: <b>' + f(g.trip_km,2) + ' km</b> &middot; WiFi: <b>' + (g.rssi_dbm||s.rssi||0) + ' dBm</b>';
+      'Sumber: <b>' + (g.src||'-') + '</b> &middot; WiFi: <b>' + (s.rssi||0) + ' dBm</b><br>' +
+      'Kirim lokasi dari halaman kontrol supaya peta mengikuti HP.';
     if (ll !== lastLL) {
       lastLL = ll;
       const q = encodeURIComponent(ll);
@@ -2250,16 +2229,24 @@ static uint8_t mapManeuver(const char* type, const char* modifier) {
   return NAV_STRAIGHT;
 }
 
-// Posisi aktual: GPS -> lokasi HP/web/serial -> geolokasi IP -> HOME.
-// Dipakai titik awal rute DAN progres navigasi, supaya tetap jalan tanpa GPS.
+// Posisi aktual: lokasi HP/web/serial -> geolokasi IP -> HOME.
+// Dipakai titik awal rute DAN progres navigasi, tanpa modul GPS.
 static bool currentPos(double& lat, double& lon) {
-  if (gps.location.isValid() && gps.location.age() < 5000) {
-    lat = gps.location.lat(); lon = gps.location.lng(); return true;
-  }
-  if (wxLocSet)              { lat = wxLat;    lon = wxLon;    return true; }
-  if (!isnan(wxIpLat))       { lat = wxIpLat;  lon = wxIpLon;  return true; }
+  if (wxLocSet)        { lat = wxLat;   lon = wxLon;   return true; }
+  if (!isnan(wxIpLat)) { lat = wxIpLat; lon = wxIpLon; return true; }
   lat = HOME_LAT; lon = HOME_LON;
   return true;
+}
+
+// Jarak 2 titik dalam meter (haversine), menggantikan TinyGPSPlus.
+static double distMeters(double la1, double lo1, double la2, double lo2) {
+  const double R = 6371000.0;
+  const double k = 0.017453292519943295;
+  double p1 = la1 * k, p2 = la2 * k;
+  double dp = (la2 - la1) * k, dl = (lo2 - lo1) * k;
+  double a = sin(dp / 2) * sin(dp / 2) +
+             cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2);
+  return 2.0 * R * asin(sqrt(a));
 }
 static double routeStartLat() { double la, lo; currentPos(la, lo); return la; }
 static double routeStartLon() { double la, lo; currentPos(la, lo); return lo; }
@@ -2332,7 +2319,7 @@ static double bearingDeg(double la1, double lo1, double la2, double lo2) {
 }
 
 // Cadangan tanpa OSRM: panah kompas langsung ke tujuan. Tetap jalan walau
-// server rute tidak bisa diakses, asal posisi didapat dari GPS/HP/IP.
+// server rute tidak bisa diakses, asal posisi didapat dari HP/web/IP.
 static bool startBearingMode(char* msg, size_t msgLen) {
   if (isnan(navDestLat) || isnan(navDestLon)) {
     snprintf(msg, msgLen, "Tujuan belum diisi");
@@ -2340,7 +2327,7 @@ static bool startBearingMode(char* msg, size_t msgLen) {
   }
   double la, lo;
   currentPos(la, lo);
-  double dist = TinyGPSPlus::distanceBetween(la, lo, navDestLat, navDestLon);
+  double dist = distMeters(la, lo, navDestLat, navDestLon);
   double brg  = bearingDeg(la, lo, navDestLat, navDestLon);
   uint8_t dir = (uint8_t)(fmod(brg + 22.5, 360.0) / 45.0) % 8;
 
@@ -2351,7 +2338,7 @@ static bool startBearingMode(char* msg, size_t msgLen) {
   snprintf(nav.road, sizeof(nav.road), "ARAH %03d", (int)brg);
   nav.at      = millis();
   nav.valid   = true;
-  screen      = SCR_GPS;
+  screen      = SCR_NAV;
 
   snprintf(msg, msgLen, "Panah ke tujuan: %.0f m, arah %03d", dist, (int)brg);
   Serial.printf("[nav] %s\n", msg);
@@ -2435,7 +2422,7 @@ static bool startRoute(double destLat, double destLon, char* msg, size_t msgLen)
   routeLastLat = slat;
   routeLastLon = slon;
   routeActive = true;
-  screen = SCR_GPS;
+  screen = SCR_NAV;
   applyRouteStep();
 
   snprintf(msg, msgLen, "Rute aktif: %d belokan, %u m",
@@ -2445,7 +2432,7 @@ static bool startRoute(double destLat, double destLon, char* msg, size_t msgLen)
 }
 
 // Maju ke petunjuk berikutnya mengikuti jarak yang benar-benar ditempuh.
-// Posisi boleh dari GPS, HP/web, atau IP -- navigasi jalan tanpa modul GPS.
+// Posisi boleh dari HP/web atau IP -- navigasi jalan tanpa modul GPS.
 static void navTask() {
   // Mode kompas: arah & jarak ikut posisi terbaru walau tanpa rute OSRM.
   if (!routeActive && nav.valid && nav.kind >= NAV_N && nav.kind <= NAV_NW) {
@@ -2455,7 +2442,7 @@ static void navTask() {
       lastCmp = millis();
       double la, lo;
       currentPos(la, lo);
-      double dist = TinyGPSPlus::distanceBetween(la, lo, navDestLat, navDestLon);
+      double dist = distMeters(la, lo, navDestLat, navDestLon);
       double brg  = bearingDeg(la, lo, navDestLat, navDestLon);
       uint8_t dir = (uint8_t)(fmod(brg + 22.5, 360.0) / 45.0) % 8;
       nav.kind = (uint8_t)(NAV_N + dir);
@@ -2468,7 +2455,7 @@ static void navTask() {
   if (!routeActive || routeCount == 0) return;
   double lat, lon;
   currentPos(lat, lon);
-  double d = TinyGPSPlus::distanceBetween(routeLastLat, routeLastLon, lat, lon);
+  double d = distMeters(routeLastLat, routeLastLon, lat, lon);
   if (d >= 0 && d < 500.0) {
     routeTravelled += (uint32_t)d;
     routeLastLat = lat;
@@ -2522,13 +2509,15 @@ static void setupWeb() {
         tv.tv_sec  = (time_t)e;
         tv.tv_usec = 0;
         settimeofday(&tv, nullptr);
-        Serial.printf("[jam] diset dari browser: %llu\n", e);
+        tzset();
+        clockSrc = CLOCK_PHONE;
+        Serial.printf("[jam] diset dari browser (HP): %llu\n", e);
       }
     }
     web.send(200, "text/plain", "ok");
   });
 
-  // Lokasi cuaca: GPS > lokasi yang diset di sini (NVS) > HOME_LAT/LON.
+  // Lokasi cuaca: lokasi yang diset di sini (NVS) > HOME_LAT/LON.
   // Contoh: /location?lat=-6.2&lon=106.8   atau   /location?reset=1
   web.on("/location", HTTP_GET, []() {
     if (web.hasArg("reset")) {
@@ -2699,7 +2688,7 @@ static void setupWeb() {
     sanitize(nav.road, sizeof(nav.road),
              web.hasArg("road") ? web.arg("road").c_str() : "");
 
-    screen = SCR_GPS;                     // langsung tampilkan di OLED
+    screen = SCR_NAV;                     // langsung tampilkan di OLED
     Serial.printf("[nav] %s %um %s\n", navText(kind), (unsigned)nav.dist, nav.road);
 
     char out[80];
@@ -2814,6 +2803,7 @@ static void setupWeb() {
     doc["heap"]     = ESP.getFreeHeap();
     doc["screen"]   = SCREEN_NAME[screen];
     doc["mood"]     = moodName(mood);
+    doc["clock_src"] = clockSrcName();   // ntp | hp | pc | -
     {
       struct tm ct;
       char tbuf[24];
@@ -2831,7 +2821,7 @@ static void setupWeb() {
     doc["wx_lon"]    = wxLon;
     doc["wx_loc_set"] = wxLocSet;
     doc["wx_phone"]   = wxLocPhone;
-    doc["wx_src"]     = wxSource();        // hp | gps | web | serial | ip | default
+    doc["wx_src"]     = wxSource();        // hp | web | serial | ip | default
     if (!isnan(wxIpLat)) {
       doc["wx_ip_lat"] = wxIpLat;
       doc["wx_ip_lon"] = wxIpLon;
@@ -2850,21 +2840,23 @@ static void setupWeb() {
     doc["route_active"] = routeActive;
     doc["route_total"]  = routeTotal;
 
+    // Kunci "gps" dipertahankan supaya halaman lama tetap jalan, tetapi
+    // datanya sekarang berasal dari HP/web/IP (tidak ada modul GPS).
     JsonObject g = doc["gps"].to<JsonObject>();
-    bool fix = gps.location.isValid() && gps.location.age() < 5000;
+    bool fix = havePhonePos();
     g["fix"]  = fix;
-    g["sats"] = gps.satellites.isValid() ? gps.satellites.value() : 0;
+    g["src"]  = wxSource();
     if (fix) {
-      g["lat"] = gps.location.lat();
-      g["lon"] = gps.location.lng();
+      g["lat"] = wxLat;
+      g["lon"] = wxLon;
     }
-    // Ekstra data untuk halaman /maps.
-    g["age_ms"]    = gps.location.age();
-    g["hdop"]      = gps.hdop.isValid() ? gps.hdop.hdop() : 0;
-    g["alt_m"]     = gps.altitude.isValid() ? gps.altitude.meters() : 0;
-    g["speed_kmh"] = gps.speed.isValid() ? gps.speed.kmph() : 0;
-    g["course"]    = gps.course.isValid() ? gps.course.deg() : 0;
-    g["trip_km"] = tripKm;
+    g["sats"]      = 0;   // tidak ada satelit; field lama kosong
+    g["age_ms"]    = 0;
+    g["hdop"]      = 0;
+    g["alt_m"]     = 0;
+    g["speed_kmh"] = 0;
+    g["course"]    = 0;
+    g["trip_km"]   = 0;
 
     JsonObject w = doc["weather"].to<JsonObject>();
     w["valid"] = wx.valid;
@@ -2918,7 +2910,7 @@ void setup() {
     if (telegramEnabled()) Serial.println("[tg] aktif (token dari NVS/config)");
   }
 
-  // Lokasi cuaca yang pernah diset dari web (dipakai kalau GPS tidak fix).
+  // Lokasi cuaca yang pernah diset dari web (dipakai kalau HP belum kirim).
   wxLocSet = prefs.getBool("wxlocset", false);
   wxLocPhone = prefs.getBool("wxlocphone", false);
   if (wxLocSet) {
@@ -2960,8 +2952,6 @@ void setup() {
     delay(60);
   }
   faceStartFrame = 0;                   // lanjut ke idle normal dari frame 0
-
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 
   // ---- hotspot sendiri (selalu nyala, HP bisa langsung connect)
   // Catatan: dulu di sini ada WiFi.scanNetworks() untuk diagnosa. Scan bikin
@@ -3025,7 +3015,6 @@ void loop() {
   static uint32_t lastRender = 0;
   static bool     ipLogged   = false;
 
-  pumpGps();
   navTask();
   updateHardwareBattery();
   updateButton();
@@ -3093,7 +3082,7 @@ void loop() {
 
   // auto-rotate hanya untuk 6 layar utama, tidak mengganggu menu/mood/makan
   if (AUTO_ROTATE_MS > 0 &&
-      screen < SCR_MENU && !(navActive() && screen == SCR_GPS)) {
+      screen < SCR_MENU && !(navActive() && screen == SCR_NAV)) {
     static uint32_t lastRotate = 0;
     uint32_t hold = (screen == SCR_FACE) ? (uint32_t)AUTO_ROTATE_MS * 2
                                          : (uint32_t)AUTO_ROTATE_MS;

@@ -38,12 +38,13 @@
 #define TZ_STRING "WIB-7"
 
 // ---------------- Lokasi cadangan ----------------
-// Dipakai untuk cuaca kalau GPS belum dapat fix dan lokasi belum diset di web.
+// Dipakai untuk cuaca kalau lokasi belum dikirim dari HP/browser.
+// Modul GPS tidak dipasang, jadi tidak ada pin/kabel GPS.
 #define HOME_LAT  -6.200000
 #define HOME_LON 106.816666
 
-// 1 = kalau GPS tidak ada fix, tebak kota dari IP publik ESP32 (gratis, tanpa
-//     API key). Jalan otomatis tiap 30 menit. Akurasi setingkat kota.
+// 1 = kalau lokasi HP belum ada, tebak kota dari IP publik ESP32 (gratis,
+//     tanpa API key). Jalan otomatis tiap 30 menit. Akurasi setingkat kota.
 // 0 = pakai HOME_LAT/HOME_LON saja sampai lokasi diset manual dari web.
 #define AUTO_IP_GEO 1
 
@@ -63,14 +64,12 @@
 // ---------------- Wiring / pin ----------------
 #define PIN_SDA    20   // OLED SDA
 #define PIN_SCL    21   // OLED SCL
-#define PIN_GPS_RX 4    // ESP32 RX  <- GPS TX
-#define PIN_GPS_TX 5    // ESP32 TX  -> GPS RX (boleh tidak disambung)
 #define PIN_BTN    3    // TTP223 OUT (aktif HIGH)
+// Tidak ada PIN_GPS_: modul GPS tidak dipakai. Lokasi cukup dari HP/browser.
 
 // Baterai Li-ion + modul TP4056.
 // PIN_BAT_ADC = pembagi tegangan baterai (100k atas / 100k bawah) -> GPIO1 (ADC1).
 // PIN_CHRG    = pin CHRG modul TP4056 (open-drain, aktif LOW) -> GPIO2.
-// GPS TX boleh tidak disambung; pin 5 dipakai GPS RX saja.
 #define PIN_BAT_ADC  1
 #define PIN_CHRG     2
 #define HAS_BAT_ADC  1
@@ -83,7 +82,6 @@
 // TTP223 keluaran HIGH saat disentuh. Kalau pakai tombol ke GND, ubah ke LOW.
 #define BTN_ACTIVE HIGH
 
-#define GPS_BAUD   9600 // NEO-6M/ATGM336H = 9600, u-blox M10 = 38400
 #define OLED_ADDR  0x3C // kalau blank coba 0x3D
 
 // Kecepatan bus I2C OLED. 800 kHz pernah dipakai tetapi bikin tampilan
