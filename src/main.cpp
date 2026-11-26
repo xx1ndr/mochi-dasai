@@ -1523,10 +1523,10 @@ static void drawMoodPicker() {
   oled.setDrawColor(1);
 }
 
-// Kirim frame ke OLED. Framebuffer u8g2 full-buffer 128x64 = 16 tile per baris
-// (8 px/tile) x 8 baris. Kita bandingkan dengan isi yang terakhir dikirim dan
-// hanya update tile yang berubah. Ini jauh lebih murah daripada sendBuffer()
-// 1024 byte tiap frame, terutama di layar jam/cuaca/notif yang hampir statis.
+// Kirim frame ke OLED. Kirim seluruh buffer (1024 byte) supaya urutan tile
+// SH1106 selalu konsisten. Percobaan update per-tile pernah bikin layar
+// bergaris/noise, jadi tidak dipakai. Frame yang benar-benar identik dilewati
+// supaya I2C tidak sibuk tanpa perlu mengubah isi layar.
 static void sendOledSmart() {
   uint8_t* buf = oled.getBufferPtr();
   if (!buf) {
@@ -1535,34 +1535,15 @@ static void sendOledSmart() {
     return;
   }
 
-  if (!oledSentValid) {
-    oled.sendBuffer();
-    memcpy(oledSentBuf, buf, MOOD_FRAME_BYTES);
-    oledSentValid = true;
-    frameBytes = MOOD_FRAME_BYTES;
-    return;
+  if (oledSentValid && memcmp(buf, oledSentBuf, MOOD_FRAME_BYTES) == 0) {
+    frameBytes = 0;
+    return;                                  // layar identik, I2C tidak disentuh
   }
 
-  uint16_t bytes = 0;
-  for (uint8_t ty = 0; ty < 8; ++ty) {
-    const uint8_t* cur = buf + (uint16_t)ty * 16;
-    const uint8_t* old = oledSentBuf + (uint16_t)ty * 16;
-    uint8_t tx0 = 16, tx1 = 0;
-    for (uint8_t tx = 0; tx < 16; ++tx) {
-      if (cur[tx] != old[tx]) {
-        if (tx < tx0) tx0 = tx;
-        tx1 = tx;
-      }
-    }
-    if (tx0 > tx1) continue;                  // baris ini tidak berubah
-    uint8_t tw = (uint8_t)(tx1 - tx0 + 1);
-    oled.updateDisplayArea(tx0, ty, tw, 1);
-    bytes += (uint16_t)tw * 8;
-  }
-
-  frameBytes = bytes;
-  if (bytes == 0) return;                    // layar identik, I2C tidak disentuh
+  oled.sendBuffer();
   memcpy(oledSentBuf, buf, MOOD_FRAME_BYTES);
+  oledSentValid = true;
+  frameBytes = MOOD_FRAME_BYTES;
 }
 
 static void render() {
@@ -1609,14 +1590,22 @@ static volatile BtnEdge btnEdgeQ[4];
 static volatile uint8_t btnEdgeHead  = 0;
 static volatile uint8_t btnEdgeCount = 0;
 static int64_t          btnLastIrqUs = 0;
+static volatile bool    btnSeen      = false;
+static volatile bool    btnLastDown  = false;
 
 static void IRAM_ATTR btnIsr() {
   int64_t t = esp_timer_get_time();
-  if (t - btnLastIrqUs < 15000) return;          // debounce 15 ms
+  if (t - btnLastIrqUs < 30000) return;          // debounce 30 ms
+  bool down = gpio_get_level((gpio_num_t)PIN_BTN) == (BTN_ACTIVE ? 1 : 0);
+  // TTP223 bisa memantul/berdenyut. Edge dengan level yang sama seperti edge
+  // terakhir yang diterima bukan transisi asli, jadi buang.
+  if (btnSeen && down == btnLastDown) return;
   btnLastIrqUs = t;
+  btnSeen      = true;
+  btnLastDown  = down;
   uint8_t h = btnEdgeHead;
   btnEdgeQ[h].us   = t;
-  btnEdgeQ[h].down = gpio_get_level((gpio_num_t)PIN_BTN) == (BTN_ACTIVE ? 1 : 0);
+  btnEdgeQ[h].down = down;
   btnEdgeHead = (h + 1) & 3;
   if (btnEdgeCount < 4) ++btnEdgeCount;
 }
