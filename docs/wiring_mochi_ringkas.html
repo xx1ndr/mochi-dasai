@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Wiring Mochi Dasai — Versi Mudah</title>
+<style>
+  @page { size: A3 landscape; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; width:1587px; height:1122px; overflow:hidden; background:#fff; }
+  body {
+    font-family:"Segoe UI",Arial,sans-serif;
+    color:#12212c;
+    -webkit-print-color-adjust:exact;
+    print-color-adjust:exact;
+  }
+  .page { position:relative; width:1587px; height:1122px; overflow:hidden; background:#fff; }
+
+  /* ---------- header ---------- */
+  .hd { position:absolute; left:42px; top:20px; right:42px; height:118px; }
+  h1 { margin:0; font-size:44px; line-height:1.05; letter-spacing:-.5px; color:#0b2b45; }
+  h1 span { color:#d21f1f; }
+  .sub { margin-top:8px; font-size:20px; color:#42596a; }
+  .sub b { color:#0b2b45; }
+  .warn {
+    position:absolute; right:0; top:0; width:470px; height:118px;
+    background:#fff7ea; border:2px solid #e3c392; border-radius:12px;
+    padding:10px 14px; color:#4a3520;
+  }
+  .warn .wt { font-size:19px; font-weight:800; color:#8a4b0b; margin-bottom:4px; }
+  .warn div.line { font-size:17px; line-height:1.28; }
+  .warn b { color:#8a4b0b; }
+
+  /* ---------- 8 step cards ---------- */
+  .step {
+    position:absolute; width:736px; height:200px;
+    border:2px solid #d3e0e9; border-radius:16px; background:#fff;
+    box-shadow:0 3px 12px rgba(16,42,64,.10); overflow:hidden;
+  }
+  .step::before { content:""; position:absolute; left:0; top:0; bottom:0; width:8px; background:var(--c); }
+  .num {
+    position:absolute; left:18px; top:16px; width:48px; height:48px;
+    border-radius:50%; background:var(--c); color:#fff;
+    font:bold 28px/48px Arial,sans-serif; text-align:center;
+    box-shadow:0 2px 7px rgba(0,0,0,.25);
+  }
+  .photos {
+    position:absolute; left:78px; top:14px; width:176px; height:172px;
+    display:flex; flex-wrap:wrap; align-content:center; gap:6px;
+  }
+  .ph {
+    position:relative; border:1px solid #cfdae2; border-radius:10px;
+    background:#f8fafc; overflow:hidden;
+  }
+  .ph.full { width:176px; height:172px; }
+  .ph.sm { width:82px; height:82px; }
+  .ph img { width:100%; height:100%; object-fit:contain; display:block; }
+  .arrow {
+    position:absolute; left:266px; top:76px;
+    font:bold 48px/1 Arial,sans-serif; color:var(--c);
+  }
+  .txt { position:absolute; left:318px; right:16px; top:15px; }
+  .ttl { font-size:24px; font-weight:800; color:#0b2b45; line-height:1.12; }
+  .row { font-size:19px; line-height:1.36; margin-top:8px; color:#1d3342; }
+  .row b { color:#0b2b45; }
+  .dot { display:inline-block; width:12px; height:12px; border-radius:50%; background:var(--c); margin-right:8px; vertical-align:-1px; }
+  .dest { color:var(--c); font-weight:800; }
+  .note3 { width:82px; height:82px; border-radius:10px; background:#fff0f0; border:2px dashed #d21f1f;
+           display:flex; align-items:center; justify-content:center; color:#d21f1f; font:bold 24px Arial; }
+  .flow { position:absolute; left:50%; transform:translateX(-50%); font:bold 18px/1 Arial; color:#9aadba; text-align:center; }
+
+  /* ---------- numbered pin markers ON real photos ---------- */
+  .pm {
+    position:absolute; z-index:3; display:flex; align-items:center; gap:4px;
+    white-space:nowrap; transform:translate(-15px,-15px); pointer-events:none;
+  }
+  .pm.flip { flex-direction:row-reverse; transform:translate(calc(-100% + 15px),-15px); }
+  .pm i {
+    display:flex; align-items:center; justify-content:center;
+    width:30px; height:30px; min-width:30px; border-radius:50%;
+    background:#0b2b45; color:#fff; border:3px solid #fff;
+    box-shadow:0 1px 5px rgba(0,0,0,.4);
+    font:bold 18px/1 Arial,sans-serif; font-style:normal;
+  }
+  .pm b {
+    background:rgba(255,255,255,.97); border:1px solid #b7c8d5; border-radius:6px;
+    padding:2px 6px; font:bold 13px/1.1 Arial,sans-serif; color:#12212c;
+  }
+  .pm.red i { background:#d21f1f; }
+  .pm.blk i { background:#222; }
+  .pm.org i { background:#e07c00; }
+  .pm.blu i { background:#1567c8; }
+  .pm.grn i { background:#15913c; }
+  .pm.pur i { background:#8038b8; }
+
+  /* ---------- color legend ---------- */
+  .legend {
+    position:absolute; left:42px; right:42px; top:1024px; height:76px;
+    border:1px solid #c9d6df; border-radius:12px; background:#f7fafc;
+    display:flex; align-items:center; gap:18px; padding:0 18px;
+    font-size:17px; color:#405361;
+  }
+  .legend .it { display:flex; align-items:center; gap:8px; white-space:nowrap; font-weight:600; }
+  .legend i { display:inline-block; width:30px; height:7px; border-radius:4px; }
+  .legend .note { margin-left:auto; font-size:16px; color:#5b6d7a; white-space:nowrap; }
+</style>
+</head>
+<body>
+<section class="page">
+
+  <div class="hd">
+    <h1>WIRING MOCHI DASAI — <span>VERSI MUDAH</span></h1>
+    <div class="sub"><b>KIRI = daya (1–4)</b> • <b>KANAN = sinyal (5–8)</b> • Ikuti nomor, panah, dan warna kabel. Angka di foto = nomor langkah.</div>
+    <div class="warn">
+      <div class="wt">⚠ PERINGATAN CEPAT</div>
+      <div class="line">• Tanpa boost, tanpa GPS, tanpa breadboard.</div>
+      <div class="line">• Baterai lemah ke 5V → reset. <b>Cas / pakai USB 5V.</b></div>
+      <div class="line">• <b>Matikan sakelar saat upload USB-C.</b></div>
+    </div>
+  </div>
+
+  <!-- ============ KIRI: DAYA ============ -->
+  <div class="step" style="left:42px; top:158px; --c:#d21f1f;">
+    <div class="num">1</div>
+    <div class="photos">
+      <div class="ph full">
+        <img src="photos/tp4056.png" alt="Modul TP4056 asli">
+        <span class="pm red" style="left:17%;top:19%"><i>1</i><b>IN+</b></span>
+        <span class="pm blk" style="left:17%;top:31%"><i>1</i><b>IN−</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">USB 5V → TP4056</div>
+      <div class="row"><span class="dot"></span>USB 5V → <b>IN+</b></div>
+      <div class="row"><span class="dot" style="background:#222"></span>USB GND → <b>IN−</b></div>
+      <div class="row dest">Tujuan: TP4056 IN+ / IN−</div>
+    </div>
+  </div>
+
+  <div class="flow" style="left:410px; top:358px">▼</div>
+
+  <div class="step" style="left:42px; top:376px; --c:#d21f1f;">
+    <div class="num">2</div>
+    <div class="photos">
+      <div class="ph full">
+        <img src="photos/batt2.png" alt="Baterai Li-ion asli">
+        <span class="pm red" style="left:33%;top:30%"><i>2</i><b>+</b></span>
+        <span class="pm blk" style="left:33%;top:72%"><i>2</i><b>−</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">Baterai → TP4056</div>
+      <div class="row"><span class="dot"></span>Baterai + → <b>B+</b></div>
+      <div class="row"><span class="dot" style="background:#222"></span>Baterai − → <b>B−</b></div>
+      <div class="row dest">Tujuan: TP4056 B+ / B−</div>
+    </div>
+  </div>
+
+  <div class="flow" style="left:410px; top:576px">▼</div>
+
+  <div class="step" style="left:42px; top:594px; --c:#e07c00;">
+    <div class="num">3</div>
+    <div class="photos">
+      <div class="ph sm">
+        <img src="photos/switch.png" alt="Sakelar asli">
+        <span class="pm org" style="left:25%;top:34%"><i>3</i><b>IN</b></span>
+      </div>
+      <div class="ph sm">
+        <img src="photos/esp32.png" alt="ESP32 asli">
+        <span class="pm org flip" style="left:86%;top:21%"><i>3</i><b>5V</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">OUT+ → sakelar → ESP32 5V</div>
+      <div class="row"><span class="dot"></span>TP4056 OUT+ → <b>sakelar IN</b></div>
+      <div class="row"><span class="dot"></span>sakelar OUT → <b>ESP32 5V</b></div>
+      <div class="row dest">Kabel oranye = 5V setelah sakelar</div>
+    </div>
+  </div>
+
+  <div class="flow" style="left:410px; top:794px">▼</div>
+
+  <div class="step" style="left:42px; top:812px; --c:#222;">
+    <div class="num">4</div>
+    <div class="photos">
+      <div class="ph sm">
+        <img src="photos/tp4056.png" alt="TP4056 asli">
+        <span class="pm blk flip" style="left:78%;top:66%"><i>4</i><b>OUT−</b></span>
+      </div>
+      <div class="ph sm">
+        <img src="photos/esp32.png" alt="ESP32 asli">
+        <span class="pm blk" style="left:14%;top:37%"><i>4</i><b>GND</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">Semua GND disatukan</div>
+      <div class="row"><span class="dot"></span>TP4056 • baterai • ESP32</div>
+      <div class="row"><span class="dot"></span>OLED • TTP223 → <b>satu GND</b></div>
+      <div class="row dest">Hitam = GND bersama ( tidak lewat sakelar )</div>
+    </div>
+  </div>
+
+  <!-- ============ KANAN: SINYAL ============ -->
+  <div class="step" style="left:820px; top:158px; --c:#d21f1f;">
+    <div class="num">5</div>
+    <div class="photos">
+      <div class="ph sm">
+        <img src="photos/esp32.png" alt="ESP32 asli">
+        <span class="pm red flip" style="left:87%;top:21%"><i>5</i><b>3V3</b></span>
+      </div>
+      <div class="ph sm">
+        <img src="photos/oled1.jpg" alt="OLED asli">
+        <span class="pm red" style="left:24%;top:25%"><i>5</i><b>VCC</b></span>
+      </div>
+      <div class="ph sm">
+        <img src="photos/ttp1.jpg" alt="TTP223 asli">
+        <span class="pm red" style="left:24%;top:27%"><i>5</i><b>VCC</b></span>
+      </div>
+      <div class="note3">3V3</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">ESP32 3V3 → OLED + TTP223</div>
+      <div class="row"><span class="dot"></span>3V3 → <b>OLED VCC</b></div>
+      <div class="row"><span class="dot"></span>3V3 → <b>TTP223 VCC</b></div>
+      <div class="row dest">Jangan kasih 5V ke OLED / TTP223</div>
+    </div>
+  </div>
+
+  <div class="flow" style="left:1188px; top:358px">▼</div>
+
+  <div class="step" style="left:820px; top:376px; --c:#1567c8;">
+    <div class="num">6</div>
+    <div class="photos">
+      <div class="ph full">
+        <img src="photos/oled1.jpg" alt="OLED SH1106 asli">
+        <span class="pm blu" style="left:24%;top:70%"><i>6</i><b>SDA</b></span>
+        <span class="pm blu flip" style="left:82%;top:38%"><i>6</i><b>SCL</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">OLED I2C → ESP32</div>
+      <div class="row"><span class="dot"></span><b>SDA → GPIO20</b></div>
+      <div class="row"><span class="dot"></span><b>SCL → GPIO21</b></div>
+      <div class="row dest">OLED SH1106 • alamat 0x3C</div>
+    </div>
+  </div>
+
+  <div class="flow" style="left:1188px; top:576px">▼</div>
+
+  <div class="step" style="left:820px; top:594px; --c:#15913c;">
+    <div class="num">7</div>
+    <div class="photos">
+      <div class="ph full">
+        <img src="photos/ttp1.jpg" alt="Sensor sentuh TTP223 asli">
+        <span class="pm grn flip" style="left:84%;top:44%"><i>7</i><b>OUT</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">TTP223 OUT → GPIO3</div>
+      <div class="row"><span class="dot"></span>OUT → <b>ESP32 GPIO3</b></div>
+      <div class="row"><span class="dot" style="background:#222"></span>GND → GND bersama</div>
+      <div class="row dest">Sensor aktif HIGH ( 3V3 )</div>
+    </div>
+  </div>
+
+  <div class="flow" style="left:1188px; top:794px">▼</div>
+
+  <div class="step" style="left:820px; top:812px; --c:#8038b8;">
+    <div class="num">8</div>
+    <div class="photos">
+      <div class="ph sm">
+        <img src="photos/batt2.png" alt="Baterai asli">
+        <span class="pm pur" style="left:33%;top:30%"><i>8</i><b>+ tap</b></span>
+      </div>
+      <div class="ph sm">
+        <img src="photos/tp4056.png" alt="TP4056 asli">
+        <span class="pm pur" style="left:25%;top:84%"><i>8</i><b>CHRG</b></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="txt">
+      <div class="ttl">ADC baterai + status cas</div>
+      <div class="row"><span class="dot"></span>Bat+ → <b>100k/100k → GPIO1</b></div>
+      <div class="row"><span class="dot"></span>TP4056 CHRG → <b>GPIO2</b></div>
+      <div class="row dest">Ungu = ADC / CHRG ( pembagi di dekat ESP32 )</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="it"><i style="background:#d21f1f"></i>merah = + / 3V3</div>
+    <div class="it"><i style="background:#222"></i>hitaman = GND</div>
+    <div class="it"><i style="background:#e07c00"></i>oranye = 5V after switch</div>
+    <div class="it"><i style="background:#1567c8"></i>biru = I2C</div>
+    <div class="it"><i style="background:#15913c"></i>hijau = tombol</div>
+    <div class="it"><i style="background:#8038b8"></i>ungu = ADC / CHRG</div>
+    <div class="note">1 halaman • 8 langkah • cek PCB</div>
+  </div>
+
+</section>
+</body>
+</html>

@@ -79,13 +79,19 @@ OLED di GPIO20/21, TTP223 OUT di GPIO3, ADC baterai di GPIO1, CHRG di GPIO2.
 
 ### OLED 1.3 inch + baterai + modul cas + sakelar ON/OFF
 
-Diagram kabel **versi mudah (1 halaman, disarankan)** ada di
-[`docs/wiring_mochi.pdf`](docs/wiring_mochi.pdf) dan
-[`docs/wiring_mochi.png`](docs/wiring_mochi.png).
+Diagram kabel **paling mudah — cukup sambung yang warnanya sama** (1 halaman,
+disarankan) ada di [`docs/wiring_mochi.pdf`](docs/wiring_mochi.pdf) dan
+[`docs/wiring_mochi.png`](docs/wiring_mochi.png). Kabel dirutekan lurus/90°,
+jalur tiap warna terpisah, tidak saling bersilang — tidak perlu paham GPIO dulu.
 
-Versi detail (2 halaman, pinout + tabel lengkap) disimpan di
-[`docs/wiring_mochi_detail.pdf`](docs/wiring_mochi_detail.pdf) dan
-[`docs/wiring_mochi_detail.html`](docs/wiring_mochi_detail.html).
+Arsip:
+
+- Versi 8 langkah bernomor (1 halaman):
+  [`docs/wiring_mochi_ringkas.pdf`](docs/wiring_mochi_ringkas.pdf) dan
+  [`docs/wiring_mochi_ringkas.html`](docs/wiring_mochi_ringkas.html).
+- Versi detail (2 halaman, pinout + tabel lengkap):
+  [`docs/wiring_mochi_detail.pdf`](docs/wiring_mochi_detail.pdf) dan
+  [`docs/wiring_mochi_detail.html`](docs/wiring_mochi_detail.html).
 
 Ringkasan singkat ada di bawah ini.
 
